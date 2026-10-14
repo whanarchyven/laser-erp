@@ -1,4 +1,5 @@
 # laser-erp
 
+Стенд и код агента для интеграции лазерного станка (CypCut / LXDS) с ERP.
 
-См. полный контекст чата и план: [docs/CHAT_HANDOFF.md](docs/CHAT_HANDOFF.md)
+Полный контекст чата, решения и план продолжения: **[docs/CHAT_HANDOFF.md](docs/CHAT_HANDOFF.md)**
