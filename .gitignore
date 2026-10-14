@@ -1,0 +1,14 @@
+node_modules
+dist
+.env.local
+.convex
+*.log
+agent/bin
+agent/obj
+agent/publish
+agent/publish-one
+agent/.tools
+agent/known.json
+agent/outbox.json
+agent/sent.json
+agent/usb

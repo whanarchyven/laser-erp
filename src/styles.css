@@ -1,0 +1,119 @@
+:root {
+  color-scheme: light;
+  --bg: #f4f1ea;
+  --ink: #1c1915;
+  --muted: #5e584e;
+  --line: #ddd4c4;
+  --card: #fffdf8;
+  --accent: #9a3412;
+  --accent-ink: #fff7ed;
+  --ok: #166534;
+  --wait: #92400e;
+  --bad: #991b1b;
+  font-family: "Segoe UI", sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input, textarea, select { font: inherit; }
+a { color: inherit; }
+
+.app { max-width: 1100px; margin: 0 auto; padding: 24px 20px 64px; }
+header { display: flex; justify-content: space-between; gap: 16px; align-items: end; margin-bottom: 20px; }
+h1 { font-size: 28px; margin: 0; letter-spacing: -0.03em; }
+h2 { font-size: 20px; margin: 0 0 12px; }
+p { margin: 0; }
+.muted { color: var(--muted); }
+nav { display: flex; gap: 8px; flex-wrap: wrap; }
+nav a, button.ghost {
+  text-decoration: none;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+nav a.active { background: var(--ink); color: var(--bg); }
+button.primary, button.danger {
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+button.primary { background: var(--accent); color: var(--accent-ink); }
+button.danger { background: transparent; color: var(--bad); border: 1px solid #fecaca; }
+button:disabled { opacity: 0.5; cursor: default; }
+
+.grid { display: grid; gap: 12px; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px;
+}
+.row { display: flex; gap: 12px; justify-content: space-between; align-items: center; }
+.stack { display: grid; gap: 8px; }
+label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+input, textarea, select {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: white;
+  color: var(--ink);
+}
+textarea { min-height: 72px; resize: vertical; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 12px;
+  background: #f5f5f4;
+}
+.badge.queued { background: #e7e5e4; }
+.badge.delivered { background: #dbeafe; color: #1e3a8a; }
+.badge.loaded { background: #e0e7ff; color: #3730a3; }
+.badge.in_progress { background: #ffedd5; color: var(--wait); }
+.badge.done { background: #dcfce7; color: var(--ok); }
+.badge.cancelled, .badge.failed { background: #fee2e2; color: var(--bad); }
+.progress { height: 8px; background: #eee; border-radius: 99px; overflow: hidden; }
+.progress span { display: block; height: 100%; background: var(--accent); }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; background: #eee; }
+.thumb.drawing { object-fit: contain; background: white; border: 1px solid var(--line); }
+.thumb.big { width: 96px; height: 96px; }
+.pick { font-size: 12px; cursor: pointer; text-decoration: underline; }
+.sheets { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+.sheet { border: 1px solid var(--line); border-radius: 12px; padding: 8px; background: white; display: grid; gap: 4px; font-size: 13px; }
+.sheet img { width: 100%; height: 220px; object-fit: contain; }
+.sheet.current { outline: 2px solid var(--accent); }
+.sheet.finished { background: #f0fdf4; }
+.screen { width: 100%; border-radius: 10px; border: 1px solid var(--line); }
+.log {
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  background: var(--ink);
+  color: var(--bg);
+  padding: 10px;
+  border-radius: 10px;
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+}
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chips span { border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 12px; background: white; }
+.error { color: var(--bad); }
+.drop {
+  border: 1px dashed var(--line);
+  border-radius: 16px;
+  padding: 28px;
+  background: white;
+  text-align: center;
+}
+.qty { display: flex; gap: 6px; align-items: center; }
+.qty input { width: 72px; }

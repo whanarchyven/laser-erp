@@ -1,0 +1,7 @@
+{
+  "BaseUrl": "http://192.168.50.1:3211",
+  "Token": "laser-stand-dev",
+  "MachineId": "",
+  "JobsDir": "C:\\Jobs",
+  "FinishPatterns": ["Конец обработки", "Processing End", "加工结束"]
+}
