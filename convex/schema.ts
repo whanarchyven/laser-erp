@@ -126,6 +126,15 @@ export default defineSchema({
     at: v.number(),
   }).index("by_event", ["eventId"]),
 
+  machineEvents: defineTable({
+    machineId: v.string(),
+    jobId: v.optional(v.id("jobs")),
+    type: v.string(),
+    text: v.string(),
+    sheetIndex: v.optional(v.number()),
+    at: v.number(),
+  }).index("by_machine", ["machineId", "at"]),
+
   heartbeats: defineTable({
     machineId: v.string(),
     agentVersion: v.string(),
@@ -138,5 +147,8 @@ export default defineSchema({
     screenId: v.optional(v.id("_storage")),
     screenAt: v.optional(v.number()),
     nest: v.optional(nestValidator),
+    debug: v.optional(v.array(v.string())),
+    machineState: v.optional(v.string()),
+    alarms: v.optional(v.array(v.string())),
   }).index("by_machine", ["machineId"]),
 });

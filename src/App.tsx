@@ -88,6 +88,35 @@ function rateLabel(rate: Rate) {
     : "грубо, по умолчанию (7 с/м + 1 с на пробивку); уточнится после первых резов";
 }
 
+const MACHINE_STATES: Record<string, string> = {
+  Working: "Режет",
+  Stop: "Стоит",
+  Pause: "Пауза",
+  Frame: "Обход рамки",
+  "Go Zero": "Едет в ноль",
+  "Go ZeroRef": "Едет в ноль",
+};
+
+function machineStateLabel(state: string) {
+  return MACHINE_STATES[state] ?? state;
+}
+
+const MACHINE_EVENTS: Record<string, string> = {
+  run_started: "старт",
+  run_finished: "лист вырезан",
+  run_stopped: "остановлен до конца листа",
+  alarm: "авария",
+  alarm_cleared: "авария снята",
+};
+
+function machineEventLabel(type: string) {
+  return MACHINE_EVENTS[type] ?? type;
+}
+
+function formatClock(ms: number) {
+  return new Date(ms).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 function isOnline(at: number) {
   return Date.now() - at < 60_000;
 }
@@ -577,10 +606,18 @@ function Machines() {
               <span className={`badge ${machine.cypcutRunning ? "done" : "cancelled"}`}>
                 CypCut {machine.cypcutRunning ? "запущен" : "не запущен"}
               </span>
+              {machine.cypcutRunning && machine.machineState && (
+                <span className={`badge ${machine.alarms.length > 0 ? "failed" : machine.machineState === "Working" ? "in_progress" : "queued"}`}>
+                  {machineStateLabel(machine.machineState)}
+                </span>
+              )}
               <button className="danger" onClick={() => void onRemove(machine.machineId, isOnline(machine.at))}>Удалить</button>
             </div>
           </div>
           {removeError?.machineId === machine.machineId && <p className="error">{removeError.message}</p>}
+          {machine.alarms.map((alarm, i) => (
+            <p key={i} className="error">Авария: {alarm}</p>
+          ))}
           {/\s-\s*CypCut/i.test(machine.windowTitle) ? (
             <p>Открыт файл: {machine.windowTitle.replace(/\s*-\s*CypCut.*$/i, "")}</p>
           ) : (
@@ -593,6 +630,25 @@ function Machines() {
             </p>
           )}
           {machine.cypcutEstimate && <p>Последний старт: {cypcutLabel(machine.cypcutEstimate)}</p>}
+          {machine.events.length > 0 && (
+            <div className="stack">
+              <strong>События станка</strong>
+              <pre className="log">
+                {machine.events
+                  .map((event) =>
+                    [
+                      formatClock(event.at),
+                      machineEventLabel(event.type),
+                      event.sheetIndex !== null ? `лист ${event.sheetIndex}` : "",
+                      event.text,
+                    ]
+                      .filter(Boolean)
+                      .join(" · "),
+                  )
+                  .join("\n")}
+              </pre>
+            </div>
+          )}
           {machine.screenUrl ? (
             <>
               <img className="screen" src={machine.screenUrl} alt="Окно CypCut" />
@@ -614,6 +670,12 @@ function Machines() {
             </div>
           )}
           <p className="muted">Скорость для оценок: {rateLabel(machine.rate)}.</p>
+          {machine.debug.length > 0 && (
+            <details>
+              <summary>Отладка агента</summary>
+              <pre className="log">{machine.debug.join("\n")}</pre>
+            </details>
+          )}
         </div>
       ))}
     </div>

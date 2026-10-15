@@ -21,6 +21,17 @@ export const machines = query({
       rate: rateValidator,
       nest: v.union(nestValidator, v.null()),
       cypcutEstimate: v.union(cypcutEstimateValidator, v.null()),
+      debug: v.array(v.string()),
+      machineState: v.union(v.string(), v.null()),
+      alarms: v.array(v.string()),
+      events: v.array(
+        v.object({
+          type: v.string(),
+          text: v.string(),
+          sheetIndex: v.union(v.number(), v.null()),
+          at: v.number(),
+        }),
+      ),
     }),
   ),
   handler: async (ctx) => {
@@ -41,6 +52,21 @@ export const machines = query({
         rate: await machineRate(ctx, row.machineId),
         nest: row.nest ?? null,
         cypcutEstimate: parseCypCutEstimate(row.logTail ?? []),
+        debug: row.debug ?? [],
+        machineState: row.machineState ?? null,
+        alarms: row.alarms ?? [],
+        events: (
+          await ctx.db
+            .query("machineEvents")
+            .withIndex("by_machine", (q) => q.eq("machineId", row.machineId))
+            .order("desc")
+            .take(20)
+        ).map((event) => ({
+          type: event.type,
+          text: event.text,
+          sheetIndex: event.sheetIndex ?? null,
+          at: event.at,
+        })),
       });
     }
     return result;
@@ -69,6 +95,12 @@ export const removeMachine = mutation({
       .query("heartbeats")
       .withIndex("by_machine", (q) => q.eq("machineId", args.machineId))
       .unique();
+    for (const event of await ctx.db
+      .query("machineEvents")
+      .withIndex("by_machine", (q) => q.eq("machineId", args.machineId))
+      .take(500)) {
+      await ctx.db.delete(event._id);
+    }
     if (!row) return null;
     if (row.screenId) await ctx.storage.delete(row.screenId);
     await ctx.db.delete(row._id);
