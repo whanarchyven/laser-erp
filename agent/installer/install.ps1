@@ -53,7 +53,7 @@ Write-Host ""
 Write-Host "Установка агента станка" -ForegroundColor Cyan
 Write-Host ""
 
-$defaults = @{ BaseUrl = ""; Token = ""; MachineId = ""; JobsDir = "C:\Jobs"; FinishPatterns = @("Конец обработки", "Processing End", "加工结束") }
+$defaults = @{ BaseUrl = ""; Token = ""; MachineId = ""; JobsDir = "C:\Jobs"; FinishPatterns = @("Конец обработки", "Processing End", "Production ends", "加工结束") }
 $templatePath = Join-Path $here "laser-agent.json"
 if (Test-Path $templatePath) {
   $template = Get-Content $templatePath -Raw -Encoding UTF8 | ConvertFrom-Json

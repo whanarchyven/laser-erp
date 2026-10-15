@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-const string AgentVersion = "0.6.4";
+const string AgentVersion = "0.6.5";
 
 using var single = new Mutex(true, @"Global\LaserAgent", out var firstInstance);
 if (!firstInstance) return;
@@ -963,7 +963,9 @@ sealed record AgentConfig(
     int ScreenSeconds = 15,
     bool Debug = true)
 {
-    public string[] Patterns => FinishPatterns ?? ["Конец обработки", "Processing End", "加工结束"];
+    // Built-in phrases are always included so configs saved by older installers still get new ones.
+    static readonly string[] BuiltInPatterns = ["Конец обработки", "Processing End", "Production ends", "加工结束"];
+    public string[] Patterns => (FinishPatterns ?? []).Concat(BuiltInPatterns).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
     public static AgentConfig Load(string[] args)
     {
