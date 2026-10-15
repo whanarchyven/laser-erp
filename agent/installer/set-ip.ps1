@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$Ip,
   [int]$Prefix = 24
 )
@@ -49,5 +49,5 @@ Start-Sleep -Seconds 3
 Get-NetConnectionProfile -InterfaceIndex $adapter.ifIndex -ErrorAction SilentlyContinue | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
 
 Write-Host ""
-Write-Host "Готово: адаптер «$($adapter.Name)» = $Ip/$Prefix" -ForegroundColor Green
-Write-Host "Вернуть автоматический адрес: Set-NetIPInterface -InterfaceAlias '$($adapter.Name)' -Dhcp Enabled"
+Write-Host ("Готово: адаптер {0} = {1}/{2}" -f $adapter.Name, $Ip, $Prefix) -ForegroundColor Green
+Write-Host ("Вернуть автоматический адрес: Set-NetIPInterface -InterfaceAlias '{0}' -Dhcp Enabled" -f $adapter.Name)
