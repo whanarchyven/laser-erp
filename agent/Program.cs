@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-const string AgentVersion = "0.6.3";
+const string AgentVersion = "0.6.4";
 
 using var single = new Mutex(true, @"Global\LaserAgent", out var firstInstance);
 if (!firstInstance) return;
@@ -27,6 +27,8 @@ var lastPrograms = new List<ProgramItem>();
 
 Console.WriteLine($"Агент {AgentVersion} {config.MachineId} → {config.BaseUrl}");
 Console.WriteLine($"Папка заданий: {config.JobsDir}, сеанс {Process.GetCurrentProcess().SessionId}");
+DebugInfo.Version = AgentVersion;
+foreach (var line in DebugInfo.Startup(config)) Console.WriteLine($"[отладка] {line}");
 
 // Separate loop: opening a file in CypCut can block the main loop for up to 90 s,
 // longer than the web page waits before showing the machine as offline.
@@ -38,10 +40,15 @@ _ = Task.Run(async () =>
         {
             var snapshot = CypCutWatch.Read();
             var nest = Step("листы раскроя", () => CypCutWatch.Nest(snapshot));
-            await HeartbeatAsync(http, config, snapshot, nest, state.Active);
+            var debug = config.Debug ? DebugInfo.Collect(snapshot) : null;
+            if (debug is not null) DebugInfo.WriteToLog(debug);
+            await HeartbeatAsync(http, config, snapshot, nest, state.Active, debug);
+            DebugInfo.Heartbeat = $"{DateTime.Now:HH:mm:ss} ok";
         }
         catch (Exception ex)
         {
+            DebugInfo.Heartbeat = $"{DateTime.Now:HH:mm:ss} ошибка: {ex.Message}";
+            DebugInfo.Error("heartbeat", ex.Message);
             Console.WriteLine($"{DateTime.Now:HH:mm:ss} heartbeat: {ex.Message}");
         }
         await Task.Delay(TimeSpan.FromSeconds(config.PollSeconds));
@@ -55,10 +62,14 @@ while (true)
     {
         await FlushAsync(http, state);
         lastPrograms = await PollAsync(http, config, state);
+        DebugInfo.Poll = $"{DateTime.Now:HH:mm:ss} ok, задач {lastPrograms.Count}"
+            + (lastPrograms.Count > 0 ? ": " + string.Join(", ", lastPrograms.Select(p => $"{p.ProgramNumber}={p.Status}")) : "");
     }
     catch (Exception ex)
     {
         online = false;
+        DebugInfo.Poll = $"{DateTime.Now:HH:mm:ss} ошибка: {ex.Message}";
+        DebugInfo.Error("опрос сервера", ex.Message);
         Console.WriteLine($"{DateTime.Now:HH:mm:ss} нет связи с сервером: {ex.Message}");
     }
     var programs = lastPrograms;
@@ -103,6 +114,7 @@ static T? Step<T>(string name, Func<T> action)
     try { return action(); }
     catch (Exception ex)
     {
+        DebugInfo.Error(name, ex.Message);
         Console.WriteLine($"{DateTime.Now:HH:mm:ss} {name}: {ex.Message}");
         return default;
     }
@@ -111,7 +123,11 @@ static T? Step<T>(string name, Func<T> action)
 static void Run(string name, Action action)
 {
     try { action(); }
-    catch (Exception ex) { Console.WriteLine($"{DateTime.Now:HH:mm:ss} {name}: {ex.Message}"); }
+    catch (Exception ex)
+    {
+        DebugInfo.Error(name, ex.Message);
+        Console.WriteLine($"{DateTime.Now:HH:mm:ss} {name}: {ex.Message}");
+    }
 }
 
 static async Task<List<ProgramItem>> PollAsync(HttpClient http, AgentConfig config, AgentState state)
@@ -286,7 +302,7 @@ static async Task DownloadAsync(HttpClient http, ProgramItem program, string tar
     File.Move(tmp, target);
 }
 
-static async Task HeartbeatAsync(HttpClient http, AgentConfig config, CypCutSnapshot snapshot, NestState? nest, string? active)
+static async Task HeartbeatAsync(HttpClient http, AgentConfig config, CypCutSnapshot snapshot, NestState? nest, string? active, string[]? debug)
 {
     var payload = JsonSerializer.Serialize(new
     {
@@ -299,6 +315,7 @@ static async Task HeartbeatAsync(HttpClient http, AgentConfig config, CypCutSnap
         logTail = snapshot.Running ? Step("журнал CypCut", () => CypCutWatch.LogLines(snapshot).TakeLast(15).ToArray()) : null,
         panel = snapshot.Running ? Step("панель CypCut", () => CypCutWatch.PanelValues(snapshot)) : null,
         nest = nest is null ? null : new { programId = active, current = nest.Current, done = nest.Done, total = nest.Total },
+        debug,
     });
     using var content = new StringContent(payload, Encoding.UTF8, "application/json");
     using var response = await http.PostAsync("agent/heartbeat", content);
@@ -915,6 +932,7 @@ static class Native
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(nint hwnd, out uint pid);
     [DllImport("user32.dll")] public static extern nint GetParent(nint hwnd);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(nint hwnd);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool IsWow64Process(nint process, out bool wow64);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(nint hwnd, StringBuilder name, int max);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern nint SendMessageTimeout(nint hwnd, uint msg, nint wParam, nint lParam, uint flags, uint timeout, out nint result);
@@ -942,7 +960,8 @@ sealed record AgentConfig(
     bool AutoOpen = true,
     int WindowDumpSeconds = 30,
     string[]? FinishPatterns = null,
-    int ScreenSeconds = 15)
+    int ScreenSeconds = 15,
+    bool Debug = true)
 {
     public string[] Patterns => FinishPatterns ?? ["Конец обработки", "Processing End", "加工结束"];
 
@@ -982,6 +1001,114 @@ sealed class TeeWriter(TextWriter first, TextWriter second) : TextWriter
         var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {value}";
         first.WriteLine(line);
         second.WriteLine(line);
+    }
+}
+
+static class DebugInfo
+{
+    static readonly object Gate = new();
+    static readonly Queue<string> Errors = new();
+    static string lastLogged = "";
+    static DateTime lastLoggedAt = DateTime.MinValue;
+
+    public static string Version = "";
+    public static volatile string Poll = "ещё не было";
+    public static volatile string Heartbeat = "ещё не было";
+
+    public static void Error(string step, string message)
+    {
+        lock (Gate)
+        {
+            Errors.Enqueue($"{DateTime.Now:HH:mm:ss} {step}: {message}");
+            while (Errors.Count > 10) Errors.Dequeue();
+        }
+    }
+
+    public static IEnumerable<string> Startup(AgentConfig config)
+    {
+        var self = Process.GetCurrentProcess();
+        yield return $"exe {Environment.ProcessPath}, 64-бит процесс {Environment.Is64BitProcess}, ОС {Environment.OSVersion}";
+        yield return $"пользователь {Environment.UserDomainName}\\{Environment.UserName}, сеанс {self.SessionId}, администратор {IsAdmin()}";
+        yield return $"CypCutPath {config.CypCutPath} существует={File.Exists(config.CypCutPath)}";
+        yield return $"PollSeconds {config.PollSeconds}, AutoOpen {config.AutoOpen}, ScreenSeconds {config.ScreenSeconds}";
+    }
+
+    public static string[] Collect(CypCutSnapshot snapshot)
+    {
+        var lines = new List<string>
+        {
+            $"агент {Version}, сеанс {Process.GetCurrentProcess().SessionId}, администратор {IsAdmin()}",
+        };
+
+        var all = Process.GetProcesses();
+        var cyp = all.Where(p => Name(p).Contains("cyp", StringComparison.OrdinalIgnoreCase)).ToArray();
+        lines.Add(cyp.Length == 0
+            ? "процессов с «cyp» в имени нет"
+            : "процессы с «cyp»: " + string.Join("; ", cyp.Select(Describe)));
+        if (cyp.Length == 0)
+        {
+            var windowed = all.Where(p => Title(p).Length > 0).Take(15).Select(p => $"{Name(p)} «{Title(p)}»");
+            lines.Add("процессы с окнами: " + string.Join("; ", windowed));
+        }
+
+        lines.Add($"CypCut найден={snapshot.Running}, окон {snapshot.Windows.Count}, заголовок «{snapshot.Title}»");
+        var main = CypCutWatch.MainWindow(snapshot);
+        lines.Add(main is null
+            ? "главное окно не найдено"
+            : $"главное окно: класс {main.Class}, текст «{main.Text}», видимо {main.Visible}");
+        var tops = snapshot.Windows.Where(w => w.Parent == 0).Take(8).Select(w => $"{w.Class}{(w.Visible ? "" : "(скрыто)")} «{w.Text}»");
+        if (snapshot.Running) lines.Add("окна верхнего уровня: " + string.Join("; ", tops));
+
+        foreach (var p in all) p.Dispose();
+
+        lines.Add($"опрос сервера: {Poll}");
+        lines.Add($"heartbeat: {Heartbeat}");
+        lock (Gate)
+        {
+            if (Errors.Count > 0) lines.Add("ошибки: " + string.Join(" | ", Errors));
+        }
+        return lines.ToArray();
+    }
+
+    public static void WriteToLog(string[] lines)
+    {
+        var stable = string.Join("\n", lines.Where(l => !l.StartsWith("опрос сервера") && !l.StartsWith("heartbeat")));
+        if (stable == lastLogged && DateTime.Now - lastLoggedAt < TimeSpan.FromMinutes(1)) return;
+        lastLogged = stable;
+        lastLoggedAt = DateTime.Now;
+        foreach (var line in lines) Console.WriteLine($"[отладка] {line}");
+    }
+
+    static string Describe(Process p)
+    {
+        var bits = "?";
+        try { bits = Native.IsWow64Process(p.Handle, out var wow) ? (wow ? "32" : "64") : "?"; } catch { }
+        string path;
+        try { path = p.MainModule?.FileName ?? "?"; } catch (Exception ex) { path = $"путь недоступен ({ex.Message})"; }
+        var matched = p.ProcessName.StartsWith("CypCut", StringComparison.OrdinalIgnoreCase) ? "подходит" : "не подходит";
+        return $"{Name(p)} #{p.Id} сеанс {Session(p)} {bits}-бит {matched}, «{Title(p)}», {path}";
+    }
+
+    static string Name(Process p)
+    {
+        try { return p.ProcessName; } catch { return "?"; }
+    }
+
+    static string Title(Process p)
+    {
+        try { return p.MainWindowTitle; } catch { return ""; }
+    }
+
+    static string Session(Process p)
+    {
+        try { return p.SessionId.ToString(); } catch { return "?"; }
+    }
+
+    static bool IsAdmin()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return new System.Security.Principal.WindowsPrincipal(identity).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
     }
 }
 
