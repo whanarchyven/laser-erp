@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-const string AgentVersion = "0.6.2";
+const string AgentVersion = "0.6.3";
 
 using var single = new Mutex(true, @"Global\LaserAgent", out var firstInstance);
 if (!firstInstance) return;
@@ -28,6 +28,26 @@ var lastPrograms = new List<ProgramItem>();
 Console.WriteLine($"Агент {AgentVersion} {config.MachineId} → {config.BaseUrl}");
 Console.WriteLine($"Папка заданий: {config.JobsDir}, сеанс {Process.GetCurrentProcess().SessionId}");
 
+// Separate loop: opening a file in CypCut can block the main loop for up to 90 s,
+// longer than the web page waits before showing the machine as offline.
+_ = Task.Run(async () =>
+{
+    while (true)
+    {
+        try
+        {
+            var snapshot = CypCutWatch.Read();
+            var nest = Step("листы раскроя", () => CypCutWatch.Nest(snapshot));
+            await HeartbeatAsync(http, config, snapshot, nest, state.Active);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"{DateTime.Now:HH:mm:ss} heartbeat: {ex.Message}");
+        }
+        await Task.Delay(TimeSpan.FromSeconds(config.PollSeconds));
+    }
+});
+
 while (true)
 {
     var online = true;
@@ -41,42 +61,57 @@ while (true)
         online = false;
         Console.WriteLine($"{DateTime.Now:HH:mm:ss} нет связи с сервером: {ex.Message}");
     }
-    try
+    var programs = lastPrograms;
+    var snapshot = Step("чтение CypCut", CypCutWatch.Read) ?? new CypCutSnapshot(false, "", []);
+    Run("вторая копия CypCut", () => CypCutWatch.DismissSecondInstance(snapshot));
+    if (Step("диагностика", () => Diagnostics.Run(config, snapshot))) lastDump = DateTime.MinValue;
+    var nest = Step("листы раскроя", () => CypCutWatch.Nest(snapshot));
+
+    if (DateTime.Now - lastDump > TimeSpan.FromSeconds(config.WindowDumpSeconds))
     {
-        var programs = lastPrograms;
-        var snapshot = CypCutWatch.Read();
-        CypCutWatch.DismissSecondInstance(snapshot);
-        if (Diagnostics.Run(config, snapshot)) lastDump = DateTime.MinValue;
-        if (DateTime.Now - lastDump > TimeSpan.FromSeconds(config.WindowDumpSeconds))
+        lastDump = DateTime.Now;
+        Run("снимок окон", () =>
         {
             var image = CypCutWatch.Capture(snapshot);
             CypCutWatch.Dump(snapshot, Path.Combine(config.JobsDir, "cypcut-windows.txt"), image);
             image?.SaveBmp(Path.Combine(config.JobsDir, "cypcut.bmp"));
-            lastDump = DateTime.Now;
-        }
-        if (online) TrackActive(state, programs, snapshot);
-        var nest = CypCutWatch.Nest(snapshot);
-        TrackRuns(config, state, snapshot, nest);
-        startMarks = TrackStarts(state, snapshot, nest, startMarks);
-        if (online)
-        {
-            if (DateTime.Now - lastOpen > TimeSpan.FromSeconds(60) && AutoOpen(config, state, programs, snapshot, ref lastOpen))
-            {
-                lastOpen = DateTime.Now;
-            }
-            await HeartbeatAsync(http, config, snapshot, nest, state.Active);
-            if (config.ScreenSeconds > 0 && DateTime.Now - lastScreen > TimeSpan.FromSeconds(config.ScreenSeconds))
-            {
-                lastScreen = DateTime.Now;
-                await ScreenAsync(http, config, snapshot);
-            }
-        }
+        });
     }
-    catch (Exception ex)
+    if (online) Run("активная задача", () => TrackActive(state, programs, snapshot));
+    Run("учёт проходов", () => TrackRuns(config, state, snapshot, nest));
+    try { startMarks = TrackStarts(state, snapshot, nest, startMarks); }
+    catch (Exception ex) { Console.WriteLine($"{DateTime.Now:HH:mm:ss} учёт стартов: {ex.Message}"); }
+    if (online)
     {
-        Console.WriteLine($"{DateTime.Now:HH:mm:ss} {ex.Message}");
+        if (DateTime.Now - lastOpen > TimeSpan.FromSeconds(60))
+        {
+            var opened = Step("автооткрытие", () => AutoOpen(config, state, programs, snapshot, ref lastOpen));
+            if (opened) lastOpen = DateTime.Now;
+        }
+        if (config.ScreenSeconds > 0 && DateTime.Now - lastScreen > TimeSpan.FromSeconds(config.ScreenSeconds))
+        {
+            lastScreen = DateTime.Now;
+            try { await ScreenAsync(http, config, snapshot); }
+            catch (Exception ex) { Console.WriteLine($"{DateTime.Now:HH:mm:ss} снимок экрана: {ex.Message}"); }
+        }
     }
     await Task.Delay(TimeSpan.FromSeconds(config.PollSeconds));
+}
+
+static T? Step<T>(string name, Func<T> action)
+{
+    try { return action(); }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"{DateTime.Now:HH:mm:ss} {name}: {ex.Message}");
+        return default;
+    }
+}
+
+static void Run(string name, Action action)
+{
+    try { action(); }
+    catch (Exception ex) { Console.WriteLine($"{DateTime.Now:HH:mm:ss} {name}: {ex.Message}"); }
 }
 
 static async Task<List<ProgramItem>> PollAsync(HttpClient http, AgentConfig config, AgentState state)
@@ -261,8 +296,8 @@ static async Task HeartbeatAsync(HttpClient http, AgentConfig config, CypCutSnap
         windowTitle = snapshot.Title,
         hostname = Environment.MachineName,
         at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-        logTail = snapshot.Running ? CypCutWatch.LogLines(snapshot).TakeLast(15).ToArray() : null,
-        panel = snapshot.Running ? CypCutWatch.PanelValues(snapshot) : null,
+        logTail = snapshot.Running ? Step("журнал CypCut", () => CypCutWatch.LogLines(snapshot).TakeLast(15).ToArray()) : null,
+        panel = snapshot.Running ? Step("панель CypCut", () => CypCutWatch.PanelValues(snapshot)) : null,
         nest = nest is null ? null : new { programId = active, current = nest.Current, done = nest.Done, total = nest.Total },
     });
     using var content = new StringContent(payload, Encoding.UTF8, "application/json");
