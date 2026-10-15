@@ -614,6 +614,12 @@ function Machines() {
             </div>
           )}
           <p className="muted">Скорость для оценок: {rateLabel(machine.rate)}.</p>
+          {machine.debug.length > 0 && (
+            <details>
+              <summary>Отладка агента</summary>
+              <pre className="log">{machine.debug.join("\n")}</pre>
+            </details>
+          )}
         </div>
       ))}
     </div>

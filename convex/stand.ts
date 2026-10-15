@@ -21,6 +21,7 @@ export const machines = query({
       rate: rateValidator,
       nest: v.union(nestValidator, v.null()),
       cypcutEstimate: v.union(cypcutEstimateValidator, v.null()),
+      debug: v.array(v.string()),
     }),
   ),
   handler: async (ctx) => {
@@ -41,6 +42,7 @@ export const machines = query({
         rate: await machineRate(ctx, row.machineId),
         nest: row.nest ?? null,
         cypcutEstimate: parseCypCutEstimate(row.logTail ?? []),
+        debug: row.debug ?? [],
       });
     }
     return result;

@@ -21,6 +21,9 @@ const listPrograms = httpAction(async (ctx, request) => {
   const machineId = new URL(request.url).searchParams.get("machineId")?.trim();
   if (!machineId) return json({ error: "machineId is required" }, 400);
   const programs = await ctx.runQuery(internal.agent.programsForAgent, { machineId });
+  if (programs.length > 0) {
+    console.log(`[агент] ${machineId}: опрос, задач ${programs.length}: ${programs.map((p) => `${p.programNumber}=${p.status}`).join(", ")}`);
+  }
   return json({ programs });
 });
 
@@ -39,6 +42,7 @@ const downloadFile = httpAction(async (ctx, request) => {
   if (!meta) return json({ error: "Program not found" }, 404);
   const blob = await ctx.storage.get(meta.fileId);
   if (!blob) return json({ error: "File missing" }, 404);
+  console.log(`[агент] скачивает ${meta.fileName} (${blob.size} байт)`);
   return new Response(blob, {
     headers: {
       "Content-Type": "application/octet-stream",
@@ -76,6 +80,9 @@ const postEvents = httpAction(async (ctx, request) => {
     ];
   });
   const result = await ctx.runMutation(internal.agent.applyEvents, { events });
+  for (const event of events) {
+    console.log(`[агент] событие ${event.type} задача ${event.programId ?? "—"}${event.detail ? `: ${event.detail.replace(/\n/g, " | ")}` : ""}`);
+  }
   return json(result);
 });
 
@@ -91,6 +98,7 @@ const postHeartbeat = httpAction(async (ctx, request) => {
     logTail?: unknown;
     panel?: unknown;
     nest?: unknown;
+    debug?: unknown;
   };
   await ctx.runMutation(internal.agent.recordHeartbeat, {
     machineId: body.machineId ?? body.hostname ?? "stand",
@@ -102,6 +110,7 @@ const postHeartbeat = httpAction(async (ctx, request) => {
     logTail: stringList(body.logTail, 40),
     panel: stringList(body.panel, 40),
     nest: nestOf(body.nest),
+    debug: stringList(body.debug, 30),
   });
   return json({ ok: true });
 });

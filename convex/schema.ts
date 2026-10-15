@@ -138,5 +138,6 @@ export default defineSchema({
     screenId: v.optional(v.id("_storage")),
     screenAt: v.optional(v.number()),
     nest: v.optional(nestValidator),
+    debug: v.optional(v.array(v.string())),
   }).index("by_machine", ["machineId"]),
 });

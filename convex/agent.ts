@@ -176,6 +176,7 @@ export const recordHeartbeat = internalMutation({
     logTail: v.optional(v.array(v.string())),
     panel: v.optional(v.array(v.string())),
     nest: v.optional(nestValidator),
+    debug: v.optional(v.array(v.string())),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -183,6 +184,17 @@ export const recordHeartbeat = internalMutation({
       .query("heartbeats")
       .withIndex("by_machine", (q) => q.eq("machineId", args.machineId))
       .unique();
+    if (
+      !existing ||
+      existing.agentVersion !== args.agentVersion ||
+      existing.cypcutRunning !== args.cypcutRunning ||
+      existing.windowTitle !== args.windowTitle
+    ) {
+      console.log(
+        `[агент] ${args.machineId}: версия ${args.agentVersion}, CypCut ${args.cypcutRunning ? "запущен" : "не запущен"}, заголовок «${args.windowTitle}»`,
+      );
+      for (const line of args.debug ?? []) console.log(`[агент] ${args.machineId}: ${line}`);
+    }
     if (existing) {
       await ctx.db.patch(existing._id, {
         agentVersion: args.agentVersion,
@@ -193,6 +205,7 @@ export const recordHeartbeat = internalMutation({
         ...(args.logTail ? { logTail: args.logTail } : {}),
         ...(args.panel ? { panel: args.panel } : {}),
         nest: args.nest,
+        debug: args.debug,
       });
     } else {
       await ctx.db.insert("heartbeats", args);
