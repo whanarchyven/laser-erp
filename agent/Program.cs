@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-const string AgentVersion = "0.6.5";
+const string AgentVersion = "0.7.0";
 
 using var single = new Mutex(true, @"Global\LaserAgent", out var firstInstance);
 if (!firstInstance) return;
@@ -22,7 +22,6 @@ var state = new AgentState(config.JobsDir);
 var lastDump = DateTime.MinValue;
 var lastOpen = DateTime.MinValue;
 var lastScreen = DateTime.MinValue;
-string? startMarks = null;
 var lastPrograms = new List<ProgramItem>();
 
 Console.WriteLine($"Агент {AgentVersion} {config.MachineId} → {config.BaseUrl}");
@@ -60,7 +59,7 @@ while (true)
     var online = true;
     try
     {
-        await FlushAsync(http, state);
+        await FlushAsync(http, config, state);
         lastPrograms = await PollAsync(http, config, state);
         DebugInfo.Poll = $"{DateTime.Now:HH:mm:ss} ok, задач {lastPrograms.Count}"
             + (lastPrograms.Count > 0 ? ": " + string.Join(", ", lastPrograms.Select(p => $"{p.ProgramNumber}={p.Status}")) : "");
@@ -89,9 +88,7 @@ while (true)
         });
     }
     if (online) Run("активная задача", () => TrackActive(state, programs, snapshot));
-    Run("учёт проходов", () => TrackRuns(config, state, snapshot, nest));
-    try { startMarks = TrackStarts(state, snapshot, nest, startMarks); }
-    catch (Exception ex) { Console.WriteLine($"{DateTime.Now:HH:mm:ss} учёт стартов: {ex.Message}"); }
+    Run("журнал станка", () => TrackLog(config, state, snapshot, nest));
     if (online)
     {
         if (DateTime.Now - lastOpen > TimeSpan.FromSeconds(60))
@@ -192,41 +189,48 @@ static void TrackActive(AgentState state, List<ProgramItem> programs, CypCutSnap
     }
 }
 
-static void TrackRuns(AgentConfig config, AgentState state, CypCutSnapshot snapshot, NestState? nest)
+static void TrackLog(AgentConfig config, AgentState state, CypCutSnapshot snapshot, NestState? nest)
 {
     if (!snapshot.Running) return;
-    var marks = snapshot.Windows.Sum(w => config.Patterns.Sum(p => CountOf(w.Text, p)));
-    var previous = state.FinishMarks;
-    state.SetFinishMarks(marks);
-    if (previous is null || marks <= previous) return;
-    var delta = marks - previous.Value;
-    var finishLines = CypCutWatch.LogLines(snapshot)
-        .Where(line => config.Patterns.Any(p => line.Contains(p, StringComparison.OrdinalIgnoreCase)))
-        .TakeLast(delta)
-        .ToList();
-    if (state.Active is null)
+    var entries = CypCutWatch.LogEntries(snapshot, config.Patterns);
+    if (entries.Count == 0) return;
+    var from = MachineLog.NewFrom(entries, state.LogCursor);
+    state.SetLogCursor(entries[^1].Line);
+    if (from < 0) return;
+    var active = state.Active;
+    var sheet = nest?.Current;
+    var where = $"{active ?? "без задачи"} лист {sheet?.ToString() ?? "?"}";
+    for (var i = from; i < entries.Count; i++)
     {
-        Console.WriteLine($"CypCut закончил проход ({delta}), но активной задачи нет: {string.Join(" | ", finishLines)}");
-        return;
+        var entry = entries[i];
+        var key = MachineLog.Key(entries, i);
+        switch (entry.Kind)
+        {
+            case LogKind.Estimate:
+                Console.WriteLine($"Старт резки: {where} | {entry.Text}");
+                if (active is null) break;
+                var detail = string.Join("\n", entries.Skip(Math.Max(0, i - 3)).Take(Math.Min(4, i + 1)).Select(e => e.Line));
+                state.Enqueue(active, "run_started", key, null, detail, sheet);
+                break;
+            case LogKind.Finish:
+                Console.WriteLine($"Лист вырезан: {where} | {entry.Text}");
+                if (active is null) break;
+                state.Enqueue(active, "run_finished", key, 1, entry.Line, sheet);
+                break;
+            case LogKind.Alarm:
+                Console.WriteLine($"Авария: {where} | {entry.To}");
+                state.Enqueue(active, "alarm", key, null, entry.To, sheet);
+                break;
+            case LogKind.AlarmRemoved:
+                Console.WriteLine($"Авария снята: {entry.To}");
+                state.Enqueue(active, "alarm_cleared", key, null, entry.To, sheet);
+                break;
+            case LogKind.Transition when MachineLog.IsInterrupted(entries, i, out var alarms):
+                Console.WriteLine($"Резка остановлена до конца листа: {where}{(alarms.Count > 0 ? " | " + string.Join(" | ", alarms) : "")}");
+                state.Enqueue(active, "run_stopped", key, null, alarms.Count > 0 ? string.Join("\n", alarms) : "Остановлено оператором", sheet);
+                break;
+        }
     }
-    var sheet = nest?.Current;
-    state.Enqueue(state.Active, "run_finished", $"{state.Active}:run:{Guid.NewGuid():N}", delta, string.Join("\n", finishLines), sheet);
-    Console.WriteLine($"Проход завершён: {state.Active} лист {sheet?.ToString() ?? "?"} +{delta} {string.Join(" | ", finishLines)}");
-}
-
-static string? TrackStarts(AgentState state, CypCutSnapshot snapshot, NestState? nest, string? previous)
-{
-    if (!snapshot.Running) return previous;
-    const string mark = "Total time (estimated)";
-    var lines = CypCutWatch.LogLines(snapshot);
-    var at = lines.FindLastIndex(line => line.Contains(mark, StringComparison.OrdinalIgnoreCase));
-    var latest = at >= 0 ? lines[at] : "";
-    if (previous is null || latest == previous || at < 0 || state.Active is null) return latest;
-    var detail = string.Join("\n", lines.Skip(Math.Max(0, at - 3)).Take(Math.Min(4, at + 1)));
-    var sheet = nest?.Current;
-    state.Enqueue(state.Active, "run_started", $"{state.Active}:start:{Guid.NewGuid():N}", null, detail, sheet);
-    Console.WriteLine($"Старт резки: {state.Active} лист {sheet?.ToString() ?? "?"} | {latest}");
-    return latest;
 }
 
 static bool AutoOpen(AgentConfig config, AgentState state, List<ProgramItem> programs, CypCutSnapshot snapshot, ref DateTime lastOpen)
@@ -269,14 +273,6 @@ static bool AutoOpen(AgentConfig config, AgentState state, List<ProgramItem> pro
     return true;
 }
 
-static int CountOf(string text, string pattern)
-{
-    if (pattern.Length == 0) return 0;
-    var count = 0;
-    for (var i = text.IndexOf(pattern, StringComparison.OrdinalIgnoreCase); i >= 0; i = text.IndexOf(pattern, i + pattern.Length, StringComparison.OrdinalIgnoreCase)) count++;
-    return count;
-}
-
 static async Task DownloadAsync(HttpClient http, ProgramItem program, string target)
 {
     var tmp = target + ".tmp";
@@ -304,6 +300,7 @@ static async Task DownloadAsync(HttpClient http, ProgramItem program, string tar
 
 static async Task HeartbeatAsync(HttpClient http, AgentConfig config, CypCutSnapshot snapshot, NestState? nest, string? active, string[]? debug)
 {
+    var entries = snapshot.Running ? Step("журнал CypCut", () => CypCutWatch.LogEntries(snapshot, config.Patterns)) : null;
     var payload = JsonSerializer.Serialize(new
     {
         machineId = config.MachineId,
@@ -312,7 +309,9 @@ static async Task HeartbeatAsync(HttpClient http, AgentConfig config, CypCutSnap
         windowTitle = snapshot.Title,
         hostname = Environment.MachineName,
         at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-        logTail = snapshot.Running ? Step("журнал CypCut", () => CypCutWatch.LogLines(snapshot).TakeLast(15).ToArray()) : null,
+        logTail = entries?.TakeLast(15).Select(e => e.Line).ToArray(),
+        machineState = entries is null ? null : MachineLog.State(entries),
+        alarms = entries is null ? null : MachineLog.ActiveAlarms(entries),
         panel = snapshot.Running ? Step("панель CypCut", () => CypCutWatch.PanelValues(snapshot)) : null,
         nest = nest is null ? null : new { programId = active, current = nest.Current, done = nest.Done, total = nest.Total },
         debug,
@@ -341,11 +340,12 @@ static async Task ScreenAsync(HttpClient http, AgentConfig config, CypCutSnapsho
     }
 }
 
-static async Task FlushAsync(HttpClient http, AgentState state)
+static async Task FlushAsync(HttpClient http, AgentConfig config, AgentState state)
 {
     if (state.Outbox.Count == 0) return;
     var payload = JsonSerializer.Serialize(new
     {
+        machineId = config.MachineId,
         events = state.Outbox.Select(item => new
         {
             eventId = item.EventId,
@@ -354,6 +354,7 @@ static async Task FlushAsync(HttpClient http, AgentState state)
             at = item.At,
             count = item.Count,
             detail = item.Detail,
+            sheet = item.Sheet,
         }),
     });
     using var content = new StringContent(payload, Encoding.UTF8, "application/json");
@@ -403,13 +404,13 @@ sealed class AgentState
         sent = new HashSet<string>(Json.Load(Path("sent.json"), new List<string>()), StringComparer.OrdinalIgnoreCase);
         var active = Json.Load(Path("active.json"), new ActiveState(null, null));
         Active = active.ProgramId;
-        FinishMarks = active.FinishMarks;
+        LogCursor = active.LogCursor;
     }
 
     public List<OutEvent> Outbox { get; }
     public Dictionary<string, string> Known { get; }
     public string? Active { get; private set; }
-    public int? FinishMarks { get; private set; }
+    public string? LogCursor { get; private set; }
 
     string Path(string name) => System.IO.Path.Combine(dir, name);
 
@@ -418,17 +419,17 @@ sealed class AgentState
     public void SetActive(string? programId)
     {
         Active = programId;
-        Json.Save(Path("active.json"), new ActiveState(Active, FinishMarks));
+        Json.Save(Path("active.json"), new ActiveState(Active, LogCursor));
     }
 
-    public void SetFinishMarks(int marks)
+    public void SetLogCursor(string line)
     {
-        if (FinishMarks == marks) return;
-        FinishMarks = marks;
-        Json.Save(Path("active.json"), new ActiveState(Active, FinishMarks));
+        if (LogCursor == line) return;
+        LogCursor = line;
+        Json.Save(Path("active.json"), new ActiveState(Active, LogCursor));
     }
 
-    public void Enqueue(string programId, string type, string? key = null, int? count = null, string? detail = null, int? sheet = null)
+    public void Enqueue(string? programId, string type, string? key = null, int? count = null, string? detail = null, int? sheet = null)
     {
         if (!sent.Add(key ?? programId + ":" + type)) return;
         Json.Save(Path("sent.json"), sent.ToList());
@@ -637,17 +638,22 @@ static class CypCutWatch
         return new WindowImage(width, height, pixels);
     }
 
-    static readonly System.Text.RegularExpressions.Regex Stamp = new(@"^\(\d{1,2}\.\d{1,2} \d{1,2}:\d{2}:\d{2}\)");
-
+    // The log is a TRichEdit in CypCut; in other builds take whichever window holds the most stamped lines.
     public static List<string> LogLines(CypCutSnapshot snapshot)
     {
         var best = snapshot.Windows
-            .Where(w => w.Class == "TRichEdit")
-            .Select(w => w.Text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList())
-            .OrderByDescending(lines => lines.Count(l => Stamp.IsMatch(l)))
+            .Where(w => w.Text.Contains('\n'))
+            .Select(w => (w.Class, Lines: w.Text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList()))
+            .Select(x => (x.Class, x.Lines, Stamped: x.Lines.Count(MachineLog.IsStamped)))
+            .Where(x => x.Stamped > 0 || x.Class == "TRichEdit")
+            .OrderByDescending(x => x.Stamped)
+            .Select(x => x.Lines)
             .FirstOrDefault();
         return best ?? [];
     }
+
+    public static List<LogEntry> LogEntries(CypCutSnapshot snapshot, IEnumerable<string> finishPatterns) =>
+        LogLines(snapshot).Select(line => MachineLog.Parse(line, finishPatterns)).ToList();
 
     public static string[] PanelValues(CypCutSnapshot snapshot)
     {
@@ -1114,8 +1120,8 @@ static class DebugInfo
     }
 }
 
-sealed record ActiveState(string? ProgramId, int? FinishMarks);
+sealed record ActiveState(string? ProgramId, string? LogCursor);
 sealed record ProgramList(List<ProgramItem>? Programs = null);
 sealed record ProgramItem(string ProgramId, string ProgramNumber, string Title, string Status, string FileName, string Sha256);
-sealed record OutEvent(string EventId, string ProgramId, string Type, long At, int? Count = null, string? Detail = null, int? Sheet = null);
+sealed record OutEvent(string EventId, string? ProgramId, string Type, long At, int? Count = null, string? Detail = null, int? Sheet = null);
 sealed record NestState(int? Current, int[] Done, int Total);
