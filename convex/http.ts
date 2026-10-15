@@ -55,6 +55,7 @@ const downloadFile = httpAction(async (ctx, request) => {
 const postEvents = httpAction(async (ctx, request) => {
   if (!authorized(request)) return json({ error: "Unauthorized" }, 401);
   const body = (await request.json()) as {
+    machineId?: string;
     events?: Array<{
       eventId?: string;
       programId?: string;
@@ -79,9 +80,10 @@ const postEvents = httpAction(async (ctx, request) => {
       },
     ];
   });
-  const result = await ctx.runMutation(internal.agent.applyEvents, { events });
+  const machineId = typeof body.machineId === "string" ? body.machineId.slice(0, 64) : undefined;
+  const result = await ctx.runMutation(internal.agent.applyEvents, { machineId, events });
   for (const event of events) {
-    console.log(`[агент] событие ${event.type} задача ${event.programId ?? "—"}${event.detail ? `: ${event.detail.replace(/\n/g, " | ")}` : ""}`);
+    console.log(`[агент] ${machineId ?? "?"}: событие ${event.type} задача ${event.programId ?? "—"}${event.detail ? `: ${event.detail.replace(/\n/g, " | ")}` : ""}`);
   }
   return json(result);
 });
@@ -99,6 +101,8 @@ const postHeartbeat = httpAction(async (ctx, request) => {
     panel?: unknown;
     nest?: unknown;
     debug?: unknown;
+    machineState?: unknown;
+    alarms?: unknown;
   };
   await ctx.runMutation(internal.agent.recordHeartbeat, {
     machineId: body.machineId ?? body.hostname ?? "stand",
@@ -111,6 +115,8 @@ const postHeartbeat = httpAction(async (ctx, request) => {
     panel: stringList(body.panel, 40),
     nest: nestOf(body.nest),
     debug: stringList(body.debug, 30),
+    machineState: typeof body.machineState === "string" ? body.machineState.slice(0, 40) : undefined,
+    alarms: stringList(body.alarms, 10),
   });
   return json({ ok: true });
 });

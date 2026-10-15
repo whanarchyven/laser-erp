@@ -70,8 +70,11 @@ export const fileForAgent = internalQuery({
   },
 });
 
+const journalTypes = new Set(["run_started", "run_finished", "run_stopped", "alarm", "alarm_cleared"]);
+
 export const applyEvents = internalMutation({
   args: {
+    machineId: v.optional(v.string()),
     events: v.array(
       v.object({
         eventId: v.string(),
@@ -153,6 +156,16 @@ export const applyEvents = internalMutation({
           }
         }
       }
+      if (args.machineId && journalTypes.has(event.type)) {
+        await ctx.db.insert("machineEvents", {
+          machineId: args.machineId,
+          jobId,
+          type: event.type,
+          text: journalText(event.type, event.detail ?? ""),
+          sheetIndex: event.sheetIndex,
+          at: event.at,
+        });
+      }
       await ctx.db.insert("agentEvents", {
         eventId: event.eventId,
         jobId,
@@ -164,6 +177,19 @@ export const applyEvents = internalMutation({
     return { accepted, duplicates };
   },
 });
+
+function journalText(type: string, detail: string): string {
+  const lines = detail.split("\n").map((line) => line.replace(/^\([^)]*\)\s*/, "").trim()).filter(Boolean);
+  if (type === "run_started") {
+    const estimate = parseCypCutEstimate(detail.split("\n"));
+    return estimate ? `оценка CypCut ${Math.round(estimate.totalSec)} с` : "";
+  }
+  if (type === "run_finished") {
+    const sec = lines.map((line) => parseDurationSec(line)).find((value) => value !== null);
+    return sec !== undefined && sec !== null ? `за ${Math.round(sec)} с` : "";
+  }
+  return lines.join("; ").slice(0, 500);
+}
 
 export const recordHeartbeat = internalMutation({
   args: {
@@ -177,6 +203,8 @@ export const recordHeartbeat = internalMutation({
     panel: v.optional(v.array(v.string())),
     nest: v.optional(nestValidator),
     debug: v.optional(v.array(v.string())),
+    machineState: v.optional(v.string()),
+    alarms: v.optional(v.array(v.string())),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -188,10 +216,12 @@ export const recordHeartbeat = internalMutation({
       !existing ||
       existing.agentVersion !== args.agentVersion ||
       existing.cypcutRunning !== args.cypcutRunning ||
-      existing.windowTitle !== args.windowTitle
+      existing.windowTitle !== args.windowTitle ||
+      existing.machineState !== args.machineState ||
+      (existing.alarms ?? []).join("|") !== (args.alarms ?? []).join("|")
     ) {
       console.log(
-        `[агент] ${args.machineId}: версия ${args.agentVersion}, CypCut ${args.cypcutRunning ? "запущен" : "не запущен"}, заголовок «${args.windowTitle}»`,
+        `[агент] ${args.machineId}: версия ${args.agentVersion}, CypCut ${args.cypcutRunning ? "запущен" : "не запущен"}, заголовок «${args.windowTitle}», состояние ${args.machineState ?? "—"}${args.alarms?.length ? `, аварии: ${args.alarms.join("; ")}` : ""}`,
       );
       for (const line of args.debug ?? []) console.log(`[агент] ${args.machineId}: ${line}`);
     }
@@ -206,6 +236,8 @@ export const recordHeartbeat = internalMutation({
         ...(args.panel ? { panel: args.panel } : {}),
         nest: args.nest,
         debug: args.debug,
+        machineState: args.machineState,
+        alarms: args.alarms,
       });
     } else {
       await ctx.db.insert("heartbeats", args);
