@@ -39,8 +39,12 @@ function Find-CypCut {
   } catch {}
   $candidates += @(
     "${env:ProgramFiles(x86)}\Friendess\CypCut\CypCut.exe",
-    "$env:ProgramFiles\Friendess\CypCut\CypCut.exe"
+    "$env:ProgramFiles\Friendess\CypCut\CypCut.exe",
+    "${env:ProgramFiles(x86)}\Friendess\CypCutE\CypCutE.exe",
+    "$env:ProgramFiles\Friendess\CypCutE\CypCutE.exe"
   )
+  $running = Get-Process | Where-Object { $_.ProcessName -like "CypCut*" -and $_.Path } | Select-Object -First 1
+  if ($running) { $candidates = @($running.Path) + $candidates }
   foreach ($path in $candidates) { if ($path -and (Test-Path $path)) { return $path } }
   return ""
 }

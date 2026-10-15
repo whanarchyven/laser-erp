@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-const string AgentVersion = "0.6.1";
+const string AgentVersion = "0.6.2";
 
 using var single = new Mutex(true, @"Global\LaserAgent", out var firstInstance);
 if (!firstInstance) return;
@@ -401,6 +401,11 @@ static class CypCutWatch
         .Where(p => p.ProcessName.StartsWith("CypCut", StringComparison.OrdinalIgnoreCase))
         .ToArray();
 
+    // CypCut is TfrmCypCut, CypCutE may use another class: fall back to the titled top-level window.
+    public static CypCutWindow? MainWindow(CypCutSnapshot snapshot) =>
+        snapshot.Windows.FirstOrDefault(w => w.Class.StartsWith("TfrmCypCut", StringComparison.OrdinalIgnoreCase))
+        ?? snapshot.Windows.FirstOrDefault(w => w.Parent == 0 && w.Visible && w.Text.Contains("CypCut", StringComparison.OrdinalIgnoreCase));
+
     public static CypCutSnapshot Read()
     {
         if (!OperatingSystem.IsWindows()) return new CypCutSnapshot(false, "", []);
@@ -428,7 +433,7 @@ static class CypCutWatch
 
     public static void OpenThroughDialog(CypCutSnapshot snapshot, string path)
     {
-        var main = snapshot.Windows.FirstOrDefault(w => w.Class == "TfrmCypCut")
+        var main = MainWindow(snapshot)
             ?? throw new InvalidOperationException("Окно CypCut не найдено");
         if (Native.IsIconic(main.Handle)) Native.ShowWindow(main.Handle, 9);
         BringToFront(main.Handle);
@@ -513,7 +518,7 @@ static class CypCutWatch
 
     public static WindowImage? Capture(CypCutSnapshot snapshot)
     {
-        var main = snapshot.Windows.FirstOrDefault(w => w.Class == "TfrmCypCut");
+        var main = MainWindow(snapshot);
         return main is null ? null : CaptureWindow(main.Handle);
     }
 
@@ -669,7 +674,7 @@ static class CypCutWatch
     public static void Dump(CypCutSnapshot snapshot, string path, WindowImage? image = null)
     {
         var lines = new List<string> { $"{DateTime.Now:O} running={snapshot.Running} title={snapshot.Title} windows={snapshot.Windows.Count}" };
-        var main = snapshot.Windows.FirstOrDefault(w => w.Class == "TfrmCypCut");
+        var main = MainWindow(snapshot);
         var origin = main is not null && Native.GetWindowRect(main.Handle, out var mr) ? mr : default;
         foreach (var w in snapshot.Windows.Where(w => w.Visible || w.Text.Length > 0))
         {
@@ -806,7 +811,7 @@ static class Diagnostics
         if (!File.Exists(path)) return false;
         var commands = File.ReadAllLines(path);
         File.Delete(path);
-        var main = snapshot.Windows.FirstOrDefault(w => w.Class == "TfrmCypCut");
+        var main = CypCutWatch.MainWindow(snapshot);
         if (main is null || !Native.GetWindowRect(main.Handle, out var origin)) return false;
         foreach (var command in commands)
         {
