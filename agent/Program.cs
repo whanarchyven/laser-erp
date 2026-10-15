@@ -396,10 +396,15 @@ sealed record CypCutSnapshot(bool Running, string Title, List<CypCutWindow> Wind
 
 static class CypCutWatch
 {
+    // Localized builds name the process like "CypCut<chinese suffix>".
+    static Process[] Processes() => Process.GetProcesses()
+        .Where(p => p.ProcessName.StartsWith("CypCut", StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+
     public static CypCutSnapshot Read()
     {
         if (!OperatingSystem.IsWindows()) return new CypCutSnapshot(false, "", []);
-        var processes = Process.GetProcessesByName("CypCut");
+        var processes = Processes();
         if (processes.Length == 0) return new CypCutSnapshot(false, "", []);
         var ids = processes.Select(p => (uint)p.Id).ToHashSet();
         var windows = new List<CypCutWindow>();
@@ -474,7 +479,7 @@ static class CypCutWatch
 
     static nint? FindFileDialog()
     {
-        var ids = Process.GetProcessesByName("CypCut").Select(p => (uint)p.Id).ToHashSet();
+        var ids = Processes().Select(p => (uint)p.Id).ToHashSet();
         nint? found = null;
         Native.EnumWindows((hwnd, _) =>
         {
