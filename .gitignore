@@ -12,3 +12,4 @@ agent/known.json
 agent/outbox.json
 agent/sent.json
 agent/usb
+server/.env
