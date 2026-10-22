@@ -2,6 +2,7 @@ import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
+import * as external from "./externalApi";
 
 function authorized(request: Request): boolean {
   const token = process.env.AGENT_TOKEN;
@@ -21,6 +22,9 @@ const listPrograms = httpAction(async (ctx, request) => {
   const machineId = new URL(request.url).searchParams.get("machineId")?.trim();
   if (!machineId) return json({ error: "machineId is required" }, 400);
   const programs = await ctx.runQuery(internal.agent.programsForAgent, { machineId });
+  if (programs.length > 0) {
+    console.log(`[агент] ${machineId}: опрос, задач ${programs.length}: ${programs.map((p) => `${p.programNumber}=${p.status}`).join(", ")}`);
+  }
   return json({ programs });
 });
 
@@ -39,6 +43,7 @@ const downloadFile = httpAction(async (ctx, request) => {
   if (!meta) return json({ error: "Program not found" }, 404);
   const blob = await ctx.storage.get(meta.fileId);
   if (!blob) return json({ error: "File missing" }, 404);
+  console.log(`[агент] скачивает ${meta.fileName} (${blob.size} байт)`);
   return new Response(blob, {
     headers: {
       "Content-Type": "application/octet-stream",
@@ -51,6 +56,7 @@ const downloadFile = httpAction(async (ctx, request) => {
 const postEvents = httpAction(async (ctx, request) => {
   if (!authorized(request)) return json({ error: "Unauthorized" }, 401);
   const body = (await request.json()) as {
+    machineId?: string;
     events?: Array<{
       eventId?: string;
       programId?: string;
@@ -75,7 +81,11 @@ const postEvents = httpAction(async (ctx, request) => {
       },
     ];
   });
-  const result = await ctx.runMutation(internal.agent.applyEvents, { events });
+  const machineId = typeof body.machineId === "string" ? body.machineId.slice(0, 64) : undefined;
+  const result = await ctx.runMutation(internal.agent.applyEvents, { machineId, events });
+  for (const event of events) {
+    console.log(`[агент] ${machineId ?? "?"}: событие ${event.type} задача ${event.programId ?? "—"}${event.detail ? `: ${event.detail.replace(/\n/g, " | ")}` : ""}`);
+  }
   return json(result);
 });
 
@@ -91,6 +101,11 @@ const postHeartbeat = httpAction(async (ctx, request) => {
     logTail?: unknown;
     panel?: unknown;
     nest?: unknown;
+    debug?: unknown;
+    machineState?: unknown;
+    alarms?: unknown;
+    ip?: unknown;
+    serverUrl?: unknown;
   };
   await ctx.runMutation(internal.agent.recordHeartbeat, {
     machineId: body.machineId ?? body.hostname ?? "stand",
@@ -102,6 +117,11 @@ const postHeartbeat = httpAction(async (ctx, request) => {
     logTail: stringList(body.logTail, 40),
     panel: stringList(body.panel, 40),
     nest: nestOf(body.nest),
+    debug: stringList(body.debug, 30),
+    machineState: typeof body.machineState === "string" ? body.machineState.slice(0, 40) : undefined,
+    alarms: stringList(body.alarms, 10),
+    ip: typeof body.ip === "string" ? body.ip.slice(0, 100) : undefined,
+    serverUrl: typeof body.serverUrl === "string" ? body.serverUrl.slice(0, 200) : undefined,
   });
   return json({ ok: true });
 });
@@ -161,5 +181,26 @@ http.route({ path: "/agent/file", method: "GET", handler: downloadFile });
 http.route({ path: "/agent/events", method: "POST", handler: postEvents });
 http.route({ path: "/agent/heartbeat", method: "POST", handler: postHeartbeat });
 http.route({ path: "/agent/screen", method: "POST", handler: postScreen });
+
+http.route({ path: "/api", method: "OPTIONS", handler: external.preflight });
+http.route({ pathPrefix: "/api/", method: "OPTIONS", handler: external.preflight });
+http.route({ path: "/api", method: "GET", handler: external.getIndex });
+http.route({ path: "/api/machines", method: "GET", handler: external.getMachines });
+http.route({ path: "/api/machines", method: "DELETE", handler: external.deleteMachine });
+http.route({ path: "/api/jobs", method: "GET", handler: external.getJobs });
+http.route({ path: "/api/jobs/file", method: "GET", handler: external.getJobFile });
+http.route({ path: "/api/jobs/qty", method: "POST", handler: external.postQty });
+http.route({ path: "/api/jobs/sheet-done", method: "POST", handler: external.postSheetDone });
+http.route({ path: "/api/jobs/finish", method: "POST", handler: external.postFinish });
+http.route({ path: "/api/jobs/cancel", method: "POST", handler: external.postCancel });
+http.route({ path: "/api/presets", method: "GET", handler: external.getPresets });
+http.route({ path: "/api/presets", method: "POST", handler: external.postPreset });
+http.route({ path: "/api/presets/inspect", method: "POST", handler: external.postInspect });
+http.route({ path: "/api/presets/enqueue", method: "POST", handler: external.postEnqueue });
+http.route({ path: "/api/files/upload-url", method: "POST", handler: external.postUploadUrl });
+http.route({ path: "/api/nomenclature", method: "GET", handler: external.getNomenclature });
+http.route({ path: "/api/nomenclature", method: "POST", handler: external.postNomenclature });
+http.route({ path: "/api/nomenclature/update", method: "POST", handler: external.postNomenclatureUpdate });
+http.route({ path: "/api/nomenclature/lookup", method: "POST", handler: external.postLookup });
 
 export default http;

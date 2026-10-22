@@ -14,7 +14,7 @@ if ($busy) {
   Write-Host "Convex уже запущен (порт 3211 занят)."
 } else {
   Start-Process powershell -WorkingDirectory $root -ArgumentList @(
-    "-NoExit", "-Command", "`$host.UI.RawUI.WindowTitle = 'Convex'; `$env:CONVEX_AGENT_MODE = 'anonymous'; npx convex dev --tail-logs disable"
+    "-NoExit", "-Command", "`$host.UI.RawUI.WindowTitle = 'Convex'; `$env:CONVEX_AGENT_MODE = 'anonymous'; npx convex dev --tail-logs always"
   )
 }
 if (Get-NetTCPConnection -State Listen -LocalPort 5173 -ErrorAction SilentlyContinue) {

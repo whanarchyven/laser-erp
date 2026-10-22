@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-const string AgentVersion = "0.6.1";
+const string AgentVersion = "0.8.0";
 
 using var single = new Mutex(true, @"Global\LaserAgent", out var firstInstance);
 if (!firstInstance) return;
@@ -22,61 +22,110 @@ var state = new AgentState(config.JobsDir);
 var lastDump = DateTime.MinValue;
 var lastOpen = DateTime.MinValue;
 var lastScreen = DateTime.MinValue;
-string? startMarks = null;
 var lastPrograms = new List<ProgramItem>();
 
 Console.WriteLine($"Агент {AgentVersion} {config.MachineId} → {config.BaseUrl}");
 Console.WriteLine($"Папка заданий: {config.JobsDir}, сеанс {Process.GetCurrentProcess().SessionId}");
+DebugInfo.Version = AgentVersion;
+foreach (var line in DebugInfo.Startup(config)) Console.WriteLine($"[отладка] {line}");
+
+// Separate loop: opening a file in CypCut can block the main loop for up to 90 s,
+// longer than the web page waits before showing the machine as offline.
+_ = Task.Run(async () =>
+{
+    while (true)
+    {
+        try
+        {
+            var snapshot = CypCutWatch.Read();
+            var nest = Step("листы раскроя", () => CypCutWatch.Nest(snapshot));
+            var debug = config.Debug ? DebugInfo.Collect(snapshot) : null;
+            if (debug is not null) DebugInfo.WriteToLog(debug);
+            await HeartbeatAsync(http, config, snapshot, nest, state.Active, debug);
+            DebugInfo.Heartbeat = $"{DateTime.Now:HH:mm:ss} ok";
+        }
+        catch (Exception ex)
+        {
+            DebugInfo.Heartbeat = $"{DateTime.Now:HH:mm:ss} ошибка: {ex.Message}";
+            DebugInfo.Error("heartbeat", ex.Message);
+            Console.WriteLine($"{DateTime.Now:HH:mm:ss} heartbeat: {ex.Message}");
+        }
+        await Task.Delay(TimeSpan.FromSeconds(config.PollSeconds));
+    }
+});
 
 while (true)
 {
     var online = true;
     try
     {
-        await FlushAsync(http, state);
+        await FlushAsync(http, config, state);
         lastPrograms = await PollAsync(http, config, state);
+        DebugInfo.Poll = $"{DateTime.Now:HH:mm:ss} ok, задач {lastPrograms.Count}"
+            + (lastPrograms.Count > 0 ? ": " + string.Join(", ", lastPrograms.Select(p => $"{p.ProgramNumber}={p.Status}")) : "");
     }
     catch (Exception ex)
     {
         online = false;
+        DebugInfo.Poll = $"{DateTime.Now:HH:mm:ss} ошибка: {ex.Message}";
+        DebugInfo.Error("опрос сервера", ex.Message);
         Console.WriteLine($"{DateTime.Now:HH:mm:ss} нет связи с сервером: {ex.Message}");
     }
-    try
+    var programs = lastPrograms;
+    var snapshot = Step("чтение CypCut", CypCutWatch.Read) ?? new CypCutSnapshot(false, "", []);
+    Run("вторая копия CypCut", () => CypCutWatch.DismissSecondInstance(snapshot));
+    if (Step("диагностика", () => Diagnostics.Run(config, snapshot))) lastDump = DateTime.MinValue;
+    var nest = Step("листы раскроя", () => CypCutWatch.Nest(snapshot));
+
+    if (DateTime.Now - lastDump > TimeSpan.FromSeconds(config.WindowDumpSeconds))
     {
-        var programs = lastPrograms;
-        var snapshot = CypCutWatch.Read();
-        CypCutWatch.DismissSecondInstance(snapshot);
-        if (Diagnostics.Run(config, snapshot)) lastDump = DateTime.MinValue;
-        if (DateTime.Now - lastDump > TimeSpan.FromSeconds(config.WindowDumpSeconds))
+        lastDump = DateTime.Now;
+        Run("снимок окон", () =>
         {
             var image = CypCutWatch.Capture(snapshot);
             CypCutWatch.Dump(snapshot, Path.Combine(config.JobsDir, "cypcut-windows.txt"), image);
             image?.SaveBmp(Path.Combine(config.JobsDir, "cypcut.bmp"));
-            lastDump = DateTime.Now;
-        }
-        if (online) TrackActive(state, programs, snapshot);
-        var nest = CypCutWatch.Nest(snapshot);
-        TrackRuns(config, state, snapshot, nest);
-        startMarks = TrackStarts(state, snapshot, nest, startMarks);
-        if (online)
-        {
-            if (DateTime.Now - lastOpen > TimeSpan.FromSeconds(60) && AutoOpen(config, state, programs, snapshot, ref lastOpen))
-            {
-                lastOpen = DateTime.Now;
-            }
-            await HeartbeatAsync(http, config, snapshot, nest, state.Active);
-            if (config.ScreenSeconds > 0 && DateTime.Now - lastScreen > TimeSpan.FromSeconds(config.ScreenSeconds))
-            {
-                lastScreen = DateTime.Now;
-                await ScreenAsync(http, config, snapshot);
-            }
-        }
+        });
     }
-    catch (Exception ex)
+    if (online) Run("активная задача", () => TrackActive(state, programs, snapshot));
+    Run("журнал станка", () => TrackLog(config, state, snapshot, nest));
+    if (DateTime.Now - lastOpen < TimeSpan.FromMinutes(2)) Run("вопрос о сохранении", () => CypCutWatch.DismissSavePrompt());
+    if (online)
     {
-        Console.WriteLine($"{DateTime.Now:HH:mm:ss} {ex.Message}");
+        if (DateTime.Now - lastOpen > TimeSpan.FromSeconds(60))
+        {
+            var opened = Step("автооткрытие", () => AutoOpen(config, state, programs, snapshot, ref lastOpen));
+            if (opened) lastOpen = DateTime.Now;
+        }
+        if (config.ScreenSeconds > 0 && DateTime.Now - lastScreen > TimeSpan.FromSeconds(config.ScreenSeconds))
+        {
+            lastScreen = DateTime.Now;
+            try { await ScreenAsync(http, config, snapshot); }
+            catch (Exception ex) { Console.WriteLine($"{DateTime.Now:HH:mm:ss} снимок экрана: {ex.Message}"); }
+        }
     }
     await Task.Delay(TimeSpan.FromSeconds(config.PollSeconds));
+}
+
+static T? Step<T>(string name, Func<T> action)
+{
+    try { return action(); }
+    catch (Exception ex)
+    {
+        DebugInfo.Error(name, ex.Message);
+        Console.WriteLine($"{DateTime.Now:HH:mm:ss} {name}: {ex.Message}");
+        return default;
+    }
+}
+
+static void Run(string name, Action action)
+{
+    try { action(); }
+    catch (Exception ex)
+    {
+        DebugInfo.Error(name, ex.Message);
+        Console.WriteLine($"{DateTime.Now:HH:mm:ss} {name}: {ex.Message}");
+    }
 }
 
 static async Task<List<ProgramItem>> PollAsync(HttpClient http, AgentConfig config, AgentState state)
@@ -141,41 +190,48 @@ static void TrackActive(AgentState state, List<ProgramItem> programs, CypCutSnap
     }
 }
 
-static void TrackRuns(AgentConfig config, AgentState state, CypCutSnapshot snapshot, NestState? nest)
+static void TrackLog(AgentConfig config, AgentState state, CypCutSnapshot snapshot, NestState? nest)
 {
     if (!snapshot.Running) return;
-    var marks = snapshot.Windows.Sum(w => config.Patterns.Sum(p => CountOf(w.Text, p)));
-    var previous = state.FinishMarks;
-    state.SetFinishMarks(marks);
-    if (previous is null || marks <= previous) return;
-    var delta = marks - previous.Value;
-    var finishLines = CypCutWatch.LogLines(snapshot)
-        .Where(line => config.Patterns.Any(p => line.Contains(p, StringComparison.OrdinalIgnoreCase)))
-        .TakeLast(delta)
-        .ToList();
-    if (state.Active is null)
+    var entries = CypCutWatch.LogEntries(snapshot, config.Patterns);
+    if (entries.Count == 0) return;
+    var from = MachineLog.NewFrom(entries, state.LogCursor);
+    state.SetLogCursor(entries[^1].Line);
+    if (from < 0) return;
+    var active = state.Active;
+    var sheet = nest?.Current;
+    var where = $"{active ?? "без задачи"} лист {sheet?.ToString() ?? "?"}";
+    for (var i = from; i < entries.Count; i++)
     {
-        Console.WriteLine($"CypCut закончил проход ({delta}), но активной задачи нет: {string.Join(" | ", finishLines)}");
-        return;
+        var entry = entries[i];
+        var key = MachineLog.Key(entries, i);
+        switch (entry.Kind)
+        {
+            case LogKind.Estimate:
+                Console.WriteLine($"Старт резки: {where} | {entry.Text}");
+                if (active is null) break;
+                var detail = string.Join("\n", entries.Skip(Math.Max(0, i - 3)).Take(Math.Min(4, i + 1)).Select(e => e.Line));
+                state.Enqueue(active, "run_started", key, null, detail, sheet);
+                break;
+            case LogKind.Finish:
+                Console.WriteLine($"Лист вырезан: {where} | {entry.Text}");
+                if (active is null) break;
+                state.Enqueue(active, "run_finished", key, 1, entry.Line, sheet);
+                break;
+            case LogKind.Alarm:
+                Console.WriteLine($"Авария: {where} | {entry.To}");
+                state.Enqueue(active, "alarm", key, null, entry.To, sheet);
+                break;
+            case LogKind.AlarmRemoved:
+                Console.WriteLine($"Авария снята: {entry.To}");
+                state.Enqueue(active, "alarm_cleared", key, null, entry.To, sheet);
+                break;
+            case LogKind.Transition when MachineLog.IsInterrupted(entries, i, out var alarms):
+                Console.WriteLine($"Резка остановлена до конца листа: {where}{(alarms.Count > 0 ? " | " + string.Join(" | ", alarms) : "")}");
+                state.Enqueue(active, "run_stopped", key, null, alarms.Count > 0 ? string.Join("\n", alarms) : "Остановлено оператором", sheet);
+                break;
+        }
     }
-    var sheet = nest?.Current;
-    state.Enqueue(state.Active, "run_finished", $"{state.Active}:run:{Guid.NewGuid():N}", delta, string.Join("\n", finishLines), sheet);
-    Console.WriteLine($"Проход завершён: {state.Active} лист {sheet?.ToString() ?? "?"} +{delta} {string.Join(" | ", finishLines)}");
-}
-
-static string? TrackStarts(AgentState state, CypCutSnapshot snapshot, NestState? nest, string? previous)
-{
-    if (!snapshot.Running) return previous;
-    const string mark = "Total time (estimated)";
-    var lines = CypCutWatch.LogLines(snapshot);
-    var at = lines.FindLastIndex(line => line.Contains(mark, StringComparison.OrdinalIgnoreCase));
-    var latest = at >= 0 ? lines[at] : "";
-    if (previous is null || latest == previous || at < 0 || state.Active is null) return latest;
-    var detail = string.Join("\n", lines.Skip(Math.Max(0, at - 3)).Take(Math.Min(4, at + 1)));
-    var sheet = nest?.Current;
-    state.Enqueue(state.Active, "run_started", $"{state.Active}:start:{Guid.NewGuid():N}", null, detail, sheet);
-    Console.WriteLine($"Старт резки: {state.Active} лист {sheet?.ToString() ?? "?"} | {latest}");
-    return latest;
 }
 
 static bool AutoOpen(AgentConfig config, AgentState state, List<ProgramItem> programs, CypCutSnapshot snapshot, ref DateTime lastOpen)
@@ -218,14 +274,6 @@ static bool AutoOpen(AgentConfig config, AgentState state, List<ProgramItem> pro
     return true;
 }
 
-static int CountOf(string text, string pattern)
-{
-    if (pattern.Length == 0) return 0;
-    var count = 0;
-    for (var i = text.IndexOf(pattern, StringComparison.OrdinalIgnoreCase); i >= 0; i = text.IndexOf(pattern, i + pattern.Length, StringComparison.OrdinalIgnoreCase)) count++;
-    return count;
-}
-
 static async Task DownloadAsync(HttpClient http, ProgramItem program, string target)
 {
     var tmp = target + ".tmp";
@@ -251,8 +299,9 @@ static async Task DownloadAsync(HttpClient http, ProgramItem program, string tar
     File.Move(tmp, target);
 }
 
-static async Task HeartbeatAsync(HttpClient http, AgentConfig config, CypCutSnapshot snapshot, NestState? nest, string? active)
+static async Task HeartbeatAsync(HttpClient http, AgentConfig config, CypCutSnapshot snapshot, NestState? nest, string? active, string[]? debug)
 {
+    var entries = snapshot.Running ? Step("журнал CypCut", () => CypCutWatch.LogEntries(snapshot, config.Patterns)) : null;
     var payload = JsonSerializer.Serialize(new
     {
         machineId = config.MachineId,
@@ -261,9 +310,14 @@ static async Task HeartbeatAsync(HttpClient http, AgentConfig config, CypCutSnap
         windowTitle = snapshot.Title,
         hostname = Environment.MachineName,
         at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-        logTail = snapshot.Running ? CypCutWatch.LogLines(snapshot).TakeLast(15).ToArray() : null,
-        panel = snapshot.Running ? CypCutWatch.PanelValues(snapshot) : null,
+        logTail = entries?.TakeLast(15).Select(e => e.Line).ToArray(),
+        machineState = entries is null ? null : MachineLog.State(entries),
+        ip = Step("адрес станка", () => Network.LocalAddress(config.BaseUrl)),
+        serverUrl = config.BaseUrl,
+        alarms = entries is null ? null : MachineLog.ActiveAlarms(entries),
+        panel = snapshot.Running ? Step("панель CypCut", () => CypCutWatch.PanelValues(snapshot)) : null,
         nest = nest is null ? null : new { programId = active, current = nest.Current, done = nest.Done, total = nest.Total },
+        debug,
     });
     using var content = new StringContent(payload, Encoding.UTF8, "application/json");
     using var response = await http.PostAsync("agent/heartbeat", content);
@@ -289,11 +343,12 @@ static async Task ScreenAsync(HttpClient http, AgentConfig config, CypCutSnapsho
     }
 }
 
-static async Task FlushAsync(HttpClient http, AgentState state)
+static async Task FlushAsync(HttpClient http, AgentConfig config, AgentState state)
 {
     if (state.Outbox.Count == 0) return;
     var payload = JsonSerializer.Serialize(new
     {
+        machineId = config.MachineId,
         events = state.Outbox.Select(item => new
         {
             eventId = item.EventId,
@@ -302,6 +357,7 @@ static async Task FlushAsync(HttpClient http, AgentState state)
             at = item.At,
             count = item.Count,
             detail = item.Detail,
+            sheet = item.Sheet,
         }),
     });
     using var content = new StringContent(payload, Encoding.UTF8, "application/json");
@@ -351,13 +407,13 @@ sealed class AgentState
         sent = new HashSet<string>(Json.Load(Path("sent.json"), new List<string>()), StringComparer.OrdinalIgnoreCase);
         var active = Json.Load(Path("active.json"), new ActiveState(null, null));
         Active = active.ProgramId;
-        FinishMarks = active.FinishMarks;
+        LogCursor = active.LogCursor;
     }
 
     public List<OutEvent> Outbox { get; }
     public Dictionary<string, string> Known { get; }
     public string? Active { get; private set; }
-    public int? FinishMarks { get; private set; }
+    public string? LogCursor { get; private set; }
 
     string Path(string name) => System.IO.Path.Combine(dir, name);
 
@@ -366,17 +422,17 @@ sealed class AgentState
     public void SetActive(string? programId)
     {
         Active = programId;
-        Json.Save(Path("active.json"), new ActiveState(Active, FinishMarks));
+        Json.Save(Path("active.json"), new ActiveState(Active, LogCursor));
     }
 
-    public void SetFinishMarks(int marks)
+    public void SetLogCursor(string line)
     {
-        if (FinishMarks == marks) return;
-        FinishMarks = marks;
-        Json.Save(Path("active.json"), new ActiveState(Active, FinishMarks));
+        if (LogCursor == line) return;
+        LogCursor = line;
+        Json.Save(Path("active.json"), new ActiveState(Active, LogCursor));
     }
 
-    public void Enqueue(string programId, string type, string? key = null, int? count = null, string? detail = null, int? sheet = null)
+    public void Enqueue(string? programId, string type, string? key = null, int? count = null, string? detail = null, int? sheet = null)
     {
         if (!sent.Add(key ?? programId + ":" + type)) return;
         Json.Save(Path("sent.json"), sent.ToList());
@@ -396,10 +452,20 @@ sealed record CypCutSnapshot(bool Running, string Title, List<CypCutWindow> Wind
 
 static class CypCutWatch
 {
+    // Localized builds name the process like "CypCut<chinese suffix>".
+    static Process[] Processes() => Process.GetProcesses()
+        .Where(p => p.ProcessName.StartsWith("CypCut", StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+
+    // CypCut is TfrmCypCut, CypCutE may use another class: fall back to the titled top-level window.
+    public static CypCutWindow? MainWindow(CypCutSnapshot snapshot) =>
+        snapshot.Windows.FirstOrDefault(w => w.Class.StartsWith("TfrmCypCut", StringComparison.OrdinalIgnoreCase))
+        ?? snapshot.Windows.FirstOrDefault(w => w.Parent == 0 && w.Visible && w.Text.Contains("CypCut", StringComparison.OrdinalIgnoreCase));
+
     public static CypCutSnapshot Read()
     {
         if (!OperatingSystem.IsWindows()) return new CypCutSnapshot(false, "", []);
-        var processes = Process.GetProcessesByName("CypCut");
+        var processes = Processes();
         if (processes.Length == 0) return new CypCutSnapshot(false, "", []);
         var ids = processes.Select(p => (uint)p.Id).ToHashSet();
         var windows = new List<CypCutWindow>();
@@ -423,7 +489,7 @@ static class CypCutWatch
 
     public static void OpenThroughDialog(CypCutSnapshot snapshot, string path)
     {
-        var main = snapshot.Windows.FirstOrDefault(w => w.Class == "TfrmCypCut")
+        var main = MainWindow(snapshot)
             ?? throw new InvalidOperationException("Окно CypCut не найдено");
         if (Native.IsIconic(main.Handle)) Native.ShowWindow(main.Handle, 9);
         BringToFront(main.Handle);
@@ -437,6 +503,7 @@ static class CypCutWatch
         while (DateTime.Now < deadline)
         {
             Thread.Sleep(500);
+            if (DismissSavePrompt()) continue;
             var dialog = FindFileDialog();
             if (dialog is null) continue;
             var edit = FindFileNameEdit(dialog.Value);
@@ -447,6 +514,9 @@ static class CypCutWatch
             if (ok == 0) throw new InvalidOperationException("В окне «Открыть» нет кнопки OK");
             Native.PostMessage(ok, Native.BM_CLICK, 0, 0);
             Console.WriteLine($"Файл выбран в окне «Открыть»: {path}");
+            // Some builds ask about unsaved changes only after the new file is chosen.
+            for (var wait = DateTime.Now.AddSeconds(15); DateTime.Now < wait; Thread.Sleep(500))
+                if (DismissSavePrompt()) break;
             return;
         }
         throw new InvalidOperationException("CypCut не показал окно «Открыть» за 90 с (возможно, ждёт ответа оператора)");
@@ -474,7 +544,7 @@ static class CypCutWatch
 
     static nint? FindFileDialog()
     {
-        var ids = Process.GetProcessesByName("CypCut").Select(p => (uint)p.Id).ToHashSet();
+        var ids = Processes().Select(p => (uint)p.Id).ToHashSet();
         nint? found = null;
         Native.EnumWindows((hwnd, _) =>
         {
@@ -508,7 +578,7 @@ static class CypCutWatch
 
     public static WindowImage? Capture(CypCutSnapshot snapshot)
     {
-        var main = snapshot.Windows.FirstOrDefault(w => w.Class == "TfrmCypCut");
+        var main = MainWindow(snapshot);
         return main is null ? null : CaptureWindow(main.Handle);
     }
 
@@ -525,20 +595,79 @@ static class CypCutWatch
             memoryTitle = snapshot.Title;
         }
         var list = snapshot.Windows.FirstOrDefault(w => w.Visible && w.Class == "TFsCheckListBox"
-            && Ask(w.Handle, Native.LB_GETCOUNT) > 1 && ItemText(w.Handle, 1).StartsWith("Nest result", StringComparison.OrdinalIgnoreCase));
+            && Ask(w.Handle, Native.LB_GETCOUNT) > 1 && IsSheetItem(ItemText(w.Handle, 1)));
         if (list is null || !Native.GetWindowRect(list.Handle, out var origin)) return null;
         var items = ListItems(list.Handle, origin, CaptureWindow(list.Handle));
         int? current = null;
         var sheet = 0;
         foreach (var item in items)
         {
-            if (!item.Text.StartsWith("Nest result", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!IsSheetItem(item.Text)) continue;
             sheet++;
             if (item.Selected) current = sheet;
             else if (item.Color != 0) doneMemory[sheet] = item.Color == DoneColor;
         }
         var done = doneMemory.Where(p => p.Value && p.Key <= sheet).Select(p => p.Key).Order().ToArray();
         return new NestState(current, done, sheet);
+    }
+
+    // CypCut: "Nest result", CypCutE: "NestedResult01", files sent by the server: "Лист 1 (1.0мм)".
+    static readonly System.Text.RegularExpressions.Regex SheetItem =
+        new(@"^\s*(nest\s*(ed)?\s*_?result|лист\s*\d)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    static bool IsSheetItem(string text) => SheetItem.IsMatch(text);
+
+    static readonly System.Text.RegularExpressions.Regex SaveQuestion =
+        new(@"save|сохран|保存", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    static readonly string[] NoCaptions = ["no", "нет", "否", "don't save", "do not save", "не сохранять"];
+
+    // Answers "No" to CypCut's "save changes?" question so a new job can replace the open drawing.
+    public static bool DismissSavePrompt()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        var ids = Processes().Select(p => (uint)p.Id).ToHashSet();
+        var answered = false;
+        Native.EnumWindows((top, _) =>
+        {
+            Native.GetWindowThreadProcessId(top, out var pid);
+            if (!ids.Contains(pid) || !Native.IsWindowVisible(top) || Native.GetWindow(top, Native.GW_OWNER) == 0) return true;
+            if (!Native.GetWindowRect(top, out var box) || box.Right - box.Left > 900 || box.Bottom - box.Top > 600) return true;
+            if (FindFileNameEdit(top) != 0) return true;
+            var children = new List<CypCutWindow>();
+            Native.EnumChildWindows(top, (child, _) =>
+            {
+                children.Add(Describe(child, Native.GetParent(child)));
+                return true;
+            }, 0);
+            var texts = children.Select(c => c.Text).Append(TextOf(top)).Where(t => t.Length > 0).ToList();
+            if (!texts.Any(t => SaveQuestion.IsMatch(t) && t.Length > 6)) return true;
+            var no = children.FirstOrDefault(c => c.Visible
+                && (c.Class.Contains("Button", StringComparison.OrdinalIgnoreCase) || c.Class.Contains("Btn", StringComparison.OrdinalIgnoreCase))
+                && NoCaptions.Contains(Caption(c.Text)));
+            if (no is null) return true;
+            Click(no);
+            Console.WriteLine($"Закрыл вопрос о сохранении кнопкой «{no.Text}»: {string.Join(" | ", texts.Where(t => t != no.Text).Take(4))}");
+            answered = true;
+            return false;
+        }, 0);
+        if (answered) Thread.Sleep(700);
+        return answered;
+    }
+
+    static string Caption(string text) =>
+        System.Text.RegularExpressions.Regex.Replace(text.Replace("&", ""), @"\(\w\)", "").Trim().ToLowerInvariant();
+
+    static void Click(CypCutWindow button)
+    {
+        if (button.Class is "Button" or "TButton" or "TBitBtn")
+        {
+            Native.PostMessage(button.Handle, Native.BM_CLICK, 0, 0);
+            return;
+        }
+        if (!Native.GetWindowRect(button.Handle, out var box)) return;
+        var lParam = (nint)((((box.Bottom - box.Top) / 2) << 16) | (((box.Right - box.Left) / 2) & 0xFFFF));
+        Native.PostMessage(button.Handle, Native.WM_LBUTTONDOWN, 1, lParam);
+        Native.PostMessage(button.Handle, Native.WM_LBUTTONUP, 0, lParam);
     }
 
     static string ItemText(nint handle, int index)
@@ -575,17 +704,22 @@ static class CypCutWatch
         return new WindowImage(width, height, pixels);
     }
 
-    static readonly System.Text.RegularExpressions.Regex Stamp = new(@"^\(\d{1,2}\.\d{1,2} \d{1,2}:\d{2}:\d{2}\)");
-
+    // The log is a TRichEdit in CypCut; in other builds take whichever window holds the most stamped lines.
     public static List<string> LogLines(CypCutSnapshot snapshot)
     {
         var best = snapshot.Windows
-            .Where(w => w.Class == "TRichEdit")
-            .Select(w => w.Text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList())
-            .OrderByDescending(lines => lines.Count(l => Stamp.IsMatch(l)))
+            .Where(w => w.Text.Contains('\n'))
+            .Select(w => (w.Class, Lines: w.Text.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList()))
+            .Select(x => (x.Class, x.Lines, Stamped: x.Lines.Count(MachineLog.IsStamped)))
+            .Where(x => x.Stamped > 0 || x.Class == "TRichEdit")
+            .OrderByDescending(x => x.Stamped)
+            .Select(x => x.Lines)
             .FirstOrDefault();
         return best ?? [];
     }
+
+    public static List<LogEntry> LogEntries(CypCutSnapshot snapshot, IEnumerable<string> finishPatterns) =>
+        LogLines(snapshot).Select(line => MachineLog.Parse(line, finishPatterns)).ToList();
 
     public static string[] PanelValues(CypCutSnapshot snapshot)
     {
@@ -664,7 +798,7 @@ static class CypCutWatch
     public static void Dump(CypCutSnapshot snapshot, string path, WindowImage? image = null)
     {
         var lines = new List<string> { $"{DateTime.Now:O} running={snapshot.Running} title={snapshot.Title} windows={snapshot.Windows.Count}" };
-        var main = snapshot.Windows.FirstOrDefault(w => w.Class == "TfrmCypCut");
+        var main = MainWindow(snapshot);
         var origin = main is not null && Native.GetWindowRect(main.Handle, out var mr) ? mr : default;
         foreach (var w in snapshot.Windows.Where(w => w.Visible || w.Text.Length > 0))
         {
@@ -801,7 +935,7 @@ static class Diagnostics
         if (!File.Exists(path)) return false;
         var commands = File.ReadAllLines(path);
         File.Delete(path);
-        var main = snapshot.Windows.FirstOrDefault(w => w.Class == "TfrmCypCut");
+        var main = CypCutWatch.MainWindow(snapshot);
         if (main is null || !Native.GetWindowRect(main.Handle, out var origin)) return false;
         foreach (var command in commands)
         {
@@ -869,7 +1003,10 @@ static class Native
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(nint parent, EnumProc proc, nint lParam);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(nint hwnd, out uint pid);
     [DllImport("user32.dll")] public static extern nint GetParent(nint hwnd);
+    public const uint GW_OWNER = 4;
+    [DllImport("user32.dll")] public static extern nint GetWindow(nint hwnd, uint command);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(nint hwnd);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool IsWow64Process(nint process, out bool wow64);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(nint hwnd, StringBuilder name, int max);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern nint SendMessageTimeout(nint hwnd, uint msg, nint wParam, nint lParam, uint flags, uint timeout, out nint result);
@@ -897,9 +1034,12 @@ sealed record AgentConfig(
     bool AutoOpen = true,
     int WindowDumpSeconds = 30,
     string[]? FinishPatterns = null,
-    int ScreenSeconds = 15)
+    int ScreenSeconds = 15,
+    bool Debug = true)
 {
-    public string[] Patterns => FinishPatterns ?? ["Конец обработки", "Processing End", "加工结束"];
+    // Built-in phrases are always included so configs saved by older installers still get new ones.
+    static readonly string[] BuiltInPatterns = ["Конец обработки", "Processing End", "Production ends", "加工结束"];
+    public string[] Patterns => (FinishPatterns ?? []).Concat(BuiltInPatterns).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
     public static AgentConfig Load(string[] args)
     {
@@ -940,8 +1080,129 @@ sealed class TeeWriter(TextWriter first, TextWriter second) : TextWriter
     }
 }
 
-sealed record ActiveState(string? ProgramId, int? FinishMarks);
+static class DebugInfo
+{
+    static readonly object Gate = new();
+    static readonly Queue<string> Errors = new();
+    static string lastLogged = "";
+    static DateTime lastLoggedAt = DateTime.MinValue;
+
+    public static string Version = "";
+    public static volatile string Poll = "ещё не было";
+    public static volatile string Heartbeat = "ещё не было";
+
+    public static void Error(string step, string message)
+    {
+        lock (Gate)
+        {
+            Errors.Enqueue($"{DateTime.Now:HH:mm:ss} {step}: {message}");
+            while (Errors.Count > 10) Errors.Dequeue();
+        }
+    }
+
+    public static IEnumerable<string> Startup(AgentConfig config)
+    {
+        var self = Process.GetCurrentProcess();
+        yield return $"exe {Environment.ProcessPath}, 64-бит процесс {Environment.Is64BitProcess}, ОС {Environment.OSVersion}";
+        yield return $"пользователь {Environment.UserDomainName}\\{Environment.UserName}, сеанс {self.SessionId}, администратор {IsAdmin()}";
+        yield return $"CypCutPath {config.CypCutPath} существует={File.Exists(config.CypCutPath)}";
+        yield return $"PollSeconds {config.PollSeconds}, AutoOpen {config.AutoOpen}, ScreenSeconds {config.ScreenSeconds}";
+    }
+
+    public static string[] Collect(CypCutSnapshot snapshot)
+    {
+        var lines = new List<string>
+        {
+            $"агент {Version}, сеанс {Process.GetCurrentProcess().SessionId}, администратор {IsAdmin()}",
+        };
+
+        var all = Process.GetProcesses();
+        var cyp = all.Where(p => Name(p).Contains("cyp", StringComparison.OrdinalIgnoreCase)).ToArray();
+        lines.Add(cyp.Length == 0
+            ? "процессов с «cyp» в имени нет"
+            : "процессы с «cyp»: " + string.Join("; ", cyp.Select(Describe)));
+        if (cyp.Length == 0)
+        {
+            var windowed = all.Where(p => Title(p).Length > 0).Take(15).Select(p => $"{Name(p)} «{Title(p)}»");
+            lines.Add("процессы с окнами: " + string.Join("; ", windowed));
+        }
+
+        lines.Add($"CypCut найден={snapshot.Running}, окон {snapshot.Windows.Count}, заголовок «{snapshot.Title}»");
+        var main = CypCutWatch.MainWindow(snapshot);
+        lines.Add(main is null
+            ? "главное окно не найдено"
+            : $"главное окно: класс {main.Class}, текст «{main.Text}», видимо {main.Visible}");
+        var tops = snapshot.Windows.Where(w => w.Parent == 0).Take(8).Select(w => $"{w.Class}{(w.Visible ? "" : "(скрыто)")} «{w.Text}»");
+        if (snapshot.Running) lines.Add("окна верхнего уровня: " + string.Join("; ", tops));
+
+        foreach (var p in all) p.Dispose();
+
+        lines.Add($"опрос сервера: {Poll}");
+        lines.Add($"heartbeat: {Heartbeat}");
+        lock (Gate)
+        {
+            if (Errors.Count > 0) lines.Add("ошибки: " + string.Join(" | ", Errors));
+        }
+        return lines.ToArray();
+    }
+
+    public static void WriteToLog(string[] lines)
+    {
+        var stable = string.Join("\n", lines.Where(l => !l.StartsWith("опрос сервера") && !l.StartsWith("heartbeat")));
+        if (stable == lastLogged && DateTime.Now - lastLoggedAt < TimeSpan.FromMinutes(1)) return;
+        lastLogged = stable;
+        lastLoggedAt = DateTime.Now;
+        foreach (var line in lines) Console.WriteLine($"[отладка] {line}");
+    }
+
+    static string Describe(Process p)
+    {
+        var bits = "?";
+        try { bits = Native.IsWow64Process(p.Handle, out var wow) ? (wow ? "32" : "64") : "?"; } catch { }
+        string path;
+        try { path = p.MainModule?.FileName ?? "?"; } catch (Exception ex) { path = $"путь недоступен ({ex.Message})"; }
+        var matched = p.ProcessName.StartsWith("CypCut", StringComparison.OrdinalIgnoreCase) ? "подходит" : "не подходит";
+        return $"{Name(p)} #{p.Id} сеанс {Session(p)} {bits}-бит {matched}, «{Title(p)}», {path}";
+    }
+
+    static string Name(Process p)
+    {
+        try { return p.ProcessName; } catch { return "?"; }
+    }
+
+    static string Title(Process p)
+    {
+        try { return p.MainWindowTitle; } catch { return ""; }
+    }
+
+    static string Session(Process p)
+    {
+        try { return p.SessionId.ToString(); } catch { return "?"; }
+    }
+
+    static bool IsAdmin()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        return new System.Security.Principal.WindowsPrincipal(identity).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+    }
+}
+
+sealed record ActiveState(string? ProgramId, string? LogCursor);
 sealed record ProgramList(List<ProgramItem>? Programs = null);
 sealed record ProgramItem(string ProgramId, string ProgramNumber, string Title, string Status, string FileName, string Sha256);
-sealed record OutEvent(string EventId, string ProgramId, string Type, long At, int? Count = null, string? Detail = null, int? Sheet = null);
+sealed record OutEvent(string EventId, string? ProgramId, string Type, long At, int? Count = null, string? Detail = null, int? Sheet = null);
 sealed record NestState(int? Current, int[] Done, int Total);
+
+static class Network
+{
+    // The address Windows would use to reach the server: that is the one worth showing in the web.
+    public static string? LocalAddress(string baseUrl)
+    {
+        var uri = new Uri(baseUrl);
+        using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+        var host = System.Net.Dns.GetHostAddresses(uri.Host).First(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+        socket.Connect(host, uri.Port);
+        return (socket.LocalEndPoint as System.Net.IPEndPoint)?.Address.ToString();
+    }
+}

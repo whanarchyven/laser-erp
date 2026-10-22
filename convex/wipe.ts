@@ -12,6 +12,7 @@ const tables = [
   "cypcutEstimates",
   "counters",
   "agentEvents",
+  "machineEvents",
   "heartbeats",
 ] as const;
 

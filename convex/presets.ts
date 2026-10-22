@@ -1,11 +1,12 @@
 import { v, type Infer } from "convex/values";
 import { action, mutation, query } from "./_generated/server";
 import type { ActionCtx } from "./_generated/server";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { rememberAlias } from "./nomenclature";
 import { parseLxds, sha256Hex } from "./lib/parseLxds";
 import { sheetValidator } from "./schema";
+import { normalizeThickness } from "./lib/sheetNames";
 
 const previewLine = v.object({
   cadName: v.string(),
@@ -148,13 +149,15 @@ export const save = mutation({
   handler: async (ctx, args) => {
     if (args.lines.length === 0) throw new Error("В пресете нет деталей");
     const title = args.title.trim() || args.fileName;
+    const thicknessMm = normalizeThickness(args.thicknessMm) ?? undefined;
+    if (args.thicknessMm?.trim() && !thicknessMm) throw new Error(`Не понял толщину «${args.thicknessMm}». Пример: 1.0`);
     const sheetCount = args.sheets.reduce((sum, sheet) => sum + sheet.planCount, 0);
     const presetId = await ctx.db.insert("presets", {
       title,
       fileName: args.fileName,
       fileId: args.fileId,
       sha256: args.sha256,
-      thicknessMm: args.thicknessMm,
+      thicknessMm,
       sheetCount,
       sheets: args.sheets,
       createdAt: Date.now(),
@@ -199,7 +202,7 @@ export const save = mutation({
     let jobId: Id<"jobs"> | null = null;
     if (args.enqueue) {
       if (!args.machineId) throw new Error("Выберите станок");
-      jobId = await enqueuePreset(ctx, presetId, args.machineId);
+      jobId = await enqueuePreset(ctx, presetId, args.machineId, thicknessMm);
     }
     return { presetId, jobId };
   },
@@ -246,10 +249,14 @@ async function enqueuePreset(
   ctx: import("./_generated/server").MutationCtx,
   presetId: Id<"presets">,
   machineId: string,
+  thicknessInput: string | undefined,
 ) {
   if (!machineId.trim()) throw new Error("Выберите станок");
   const preset = await ctx.db.get(presetId);
   if (!preset) throw new Error("Пресет не найден");
+  const thicknessMm = normalizeThickness(thicknessInput ?? preset.thicknessMm);
+  if (!thicknessMm) throw new Error("Укажите толщину листа, например 1.0");
+  if (preset.thicknessMm !== thicknessMm) await ctx.db.patch(presetId, { thicknessMm });
   const lines = await ctx.db
     .query("presetLines")
     .withIndex("by_preset", (q) => q.eq("presetId", presetId))
@@ -276,8 +283,11 @@ async function enqueuePreset(
     sha256: preset.sha256,
     status: "queued",
     machineId: machineId.trim(),
+    thicknessMm,
+    fileReady: false,
     createdAt: Date.now(),
   });
+  await ctx.scheduler.runAfter(0, internal.jobFiles.prepare, { jobId, fileId: preset.fileId, thicknessMm });
   for (const line of lines) {
     await ctx.db.insert("jobLines", {
       jobId,
@@ -292,9 +302,9 @@ async function enqueuePreset(
 }
 
 export const enqueue = mutation({
-  args: { presetId: v.id("presets"), machineId: v.string() },
+  args: { presetId: v.id("presets"), machineId: v.string(), thicknessMm: v.optional(v.string()) },
   returns: v.id("jobs"),
   handler: async (ctx, args) => {
-    return await enqueuePreset(ctx, args.presetId, args.machineId);
+    return await enqueuePreset(ctx, args.presetId, args.machineId, args.thicknessMm);
   },
 });

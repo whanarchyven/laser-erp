@@ -3,5 +3,5 @@
   "Token": "laser-stand-dev",
   "MachineId": "",
   "JobsDir": "C:\\Jobs",
-  "FinishPatterns": ["Конец обработки", "Processing End", "加工结束"]
+  "FinishPatterns": ["Конец обработки", "Processing End", "Production ends", "加工结束"]
 }

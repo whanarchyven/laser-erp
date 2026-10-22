@@ -13,7 +13,7 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 Copy-Item (Join-Path $agent "publish-one\LaserAgent.exe") $out
 
 $bom = New-Object Text.UTF8Encoding($true)
-foreach ($name in @("install.ps1", "uninstall.ps1", "set-ip.ps1")) {
+foreach ($name in @("install.ps1", "uninstall.ps1", "set-ip.ps1", "network.ps1")) {
   $text = [IO.File]::ReadAllText((Join-Path $agent "installer\$name"))
   [IO.File]::WriteAllText((Join-Path $out $name), $text, $bom)
 }
