@@ -1,4 +1,6 @@
-param(
+﻿param(
+  [string]$ServerIp,
+  [string]$MachineIp,
   [string]$BaseUrl,
   [string]$Token,
   [string]$MachineId,
@@ -13,6 +15,8 @@ $taskName = "LaserAgent"
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) {
   $forward = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$($MyInvocation.MyCommand.Path)`"")
+  if ($ServerIp) { $forward += @("-ServerIp", $ServerIp) }
+  if ($MachineIp) { $forward += @("-MachineIp", $MachineIp) }
   if ($BaseUrl) { $forward += @("-BaseUrl", "`"$BaseUrl`"") }
   if ($Token) { $forward += @("-Token", "`"$Token`"") }
   if ($MachineId) { $forward += @("-MachineId", "`"$MachineId`"") }
@@ -20,6 +24,7 @@ if (-not $admin) {
   Start-Process powershell -Verb RunAs -ArgumentList $forward -Wait
   exit
 }
+. (Join-Path $here "network.ps1")
 
 function Ask([string]$label, [string]$default) {
   if ($Quiet) { return $default }
@@ -71,7 +76,34 @@ if (Test-Path $existingPath) {
 }
 if (-not $defaults.MachineId) { $defaults.MachineId = $env:COMPUTERNAME }
 
-if (-not $BaseUrl) { $BaseUrl = Ask "Адрес сервера" $defaults.BaseUrl }
+Write-Host "Шаг 1. Сеть" -ForegroundColor Cyan
+$defaultServer = "192.168.50.1"
+$knownUrl = if ($BaseUrl) { $BaseUrl } else { $defaults.BaseUrl }
+if ($knownUrl) { try { $defaultServer = ([Uri]$knownUrl).Host } catch {} }
+if (-not $ServerIp) { $ServerIp = Ask "IP-адрес сервера" $defaultServer }
+if (-not (Test-Ipv4 $ServerIp)) { throw "Неверный IP-адрес сервера: $ServerIp" }
+
+$near = Find-AddressNear $ServerIp
+if ($near -and -not $MachineIp) {
+  Write-Host ("IP-адрес станка уже есть: {0} (адаптер {1})" -f $near.IPAddress, $near.InterfaceAlias) -ForegroundColor Green
+  $MachineIp = $near.IPAddress
+} else {
+  if (-not $near) { Write-Host "У станка нет адреса в сети сервера $ServerIp — зададим его сейчас." -ForegroundColor Yellow }
+  $adapter = if ($Quiet) { Get-WiredAdapters | Where-Object Status -eq "Up" | Select-Object -First 1 } else { Select-WiredAdapter }
+  if (-not $adapter) { throw "Не найден подключённый проводной адаптер" }
+  if (-not $MachineIp) { $MachineIp = Ask "IP-адрес этого станка" (Find-FreeAddress $ServerIp) }
+  if (-not (Test-Ipv4 $MachineIp)) { throw "Неверный IP-адрес станка: $MachineIp" }
+  if (-not (Test-SameSubnet $MachineIp $ServerIp 24)) { Write-Host "Внимание: $MachineIp и сервер $ServerIp в разных подсетях /24." -ForegroundColor Yellow }
+  Set-StaticAddress $adapter $MachineIp 24
+}
+if (Test-Connection -ComputerName $ServerIp -Count 2 -Quiet -ErrorAction SilentlyContinue) {
+  Write-Host "Сервер $ServerIp отвечает на ping" -ForegroundColor Green
+} else {
+  Write-Host "Сервер $ServerIp не отвечает на ping (проверьте кабель; на сервере ping может быть закрыт брандмауэром)." -ForegroundColor Yellow
+}
+if (-not $BaseUrl -or ([Uri]$BaseUrl).Host -ne $ServerIp) { $BaseUrl = "http://${ServerIp}:3211" }
+Write-Host ""
+Write-Host "Шаг 2. Агент" -ForegroundColor Cyan
 if (-not $Token) { $Token = Ask "Ключ агента" $defaults.Token }
 if (-not $MachineId) { $MachineId = Ask "Имя станка (так он будет виден в вебе)" $defaults.MachineId }
 $BaseUrl = $BaseUrl.TrimEnd("/")
@@ -95,6 +127,8 @@ New-Item -ItemType Directory -Force -Path $defaults.JobsDir | Out-Null
 
 $settings = [ordered]@{
   BaseUrl = $BaseUrl
+  ServerIp = $ServerIp
+  MachineIp = $MachineIp
   Token = $Token
   JobsDir = $defaults.JobsDir
   PollSeconds = 5
@@ -136,6 +170,6 @@ if (Get-Process -Name "LaserAgent" -ErrorAction SilentlyContinue) {
 } else {
   Write-Host "Агент установлен, но не запустился. Журнал: $($defaults.JobsDir)\agent.log" -ForegroundColor Red
 }
-Write-Host "Станок: $MachineId"
+Write-Host "Станок: $MachineId, IP $MachineIp"
 Write-Host "Сервер: $BaseUrl"
 Write-Host "Папка заданий и журнал: $($defaults.JobsDir)"
