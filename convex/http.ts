@@ -2,6 +2,7 @@ import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
+import * as external from "./externalApi";
 
 function authorized(request: Request): boolean {
   const token = process.env.AGENT_TOKEN;
@@ -180,5 +181,26 @@ http.route({ path: "/agent/file", method: "GET", handler: downloadFile });
 http.route({ path: "/agent/events", method: "POST", handler: postEvents });
 http.route({ path: "/agent/heartbeat", method: "POST", handler: postHeartbeat });
 http.route({ path: "/agent/screen", method: "POST", handler: postScreen });
+
+http.route({ path: "/api", method: "OPTIONS", handler: external.preflight });
+http.route({ pathPrefix: "/api/", method: "OPTIONS", handler: external.preflight });
+http.route({ path: "/api", method: "GET", handler: external.getIndex });
+http.route({ path: "/api/machines", method: "GET", handler: external.getMachines });
+http.route({ path: "/api/machines", method: "DELETE", handler: external.deleteMachine });
+http.route({ path: "/api/jobs", method: "GET", handler: external.getJobs });
+http.route({ path: "/api/jobs/file", method: "GET", handler: external.getJobFile });
+http.route({ path: "/api/jobs/qty", method: "POST", handler: external.postQty });
+http.route({ path: "/api/jobs/sheet-done", method: "POST", handler: external.postSheetDone });
+http.route({ path: "/api/jobs/finish", method: "POST", handler: external.postFinish });
+http.route({ path: "/api/jobs/cancel", method: "POST", handler: external.postCancel });
+http.route({ path: "/api/presets", method: "GET", handler: external.getPresets });
+http.route({ path: "/api/presets", method: "POST", handler: external.postPreset });
+http.route({ path: "/api/presets/inspect", method: "POST", handler: external.postInspect });
+http.route({ path: "/api/presets/enqueue", method: "POST", handler: external.postEnqueue });
+http.route({ path: "/api/files/upload-url", method: "POST", handler: external.postUploadUrl });
+http.route({ path: "/api/nomenclature", method: "GET", handler: external.getNomenclature });
+http.route({ path: "/api/nomenclature", method: "POST", handler: external.postNomenclature });
+http.route({ path: "/api/nomenclature/update", method: "POST", handler: external.postNomenclatureUpdate });
+http.route({ path: "/api/nomenclature/lookup", method: "POST", handler: external.postLookup });
 
 export default http;

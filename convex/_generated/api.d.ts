@@ -9,6 +9,7 @@
  */
 
 import type * as agent from "../agent.js";
+import type * as externalApi from "../externalApi.js";
 import type * as http from "../http.js";
 import type * as jobFiles from "../jobFiles.js";
 import type * as jobs from "../jobs.js";
@@ -34,6 +35,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   agent: typeof agent;
+  externalApi: typeof externalApi;
   http: typeof http;
   jobFiles: typeof jobFiles;
   jobs: typeof jobs;

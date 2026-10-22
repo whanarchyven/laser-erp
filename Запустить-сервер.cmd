@@ -13,7 +13,7 @@ for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /c:"IPv4"') do (
 if not defined IP set "IP=127.0.0.1"
 
 if not exist "server\.env" (
-  powershell -NoProfile -Command "$s=[guid]::NewGuid().Guid.Replace('-','')+[guid]::NewGuid().Guid.Replace('-',''); $s=$s.Substring(0,64); @('PORT=3210','SITE_PROXY_PORT=3211','WEB_PORT=5173','DASHBOARD_PORT=6791','CONVEX_CLOUD_ORIGIN=http://%IP%:3210','CONVEX_SITE_ORIGIN=http://%IP%:3211','INSTANCE_NAME=laser-erp',('INSTANCE_SECRET='+$s),'AGENT_TOKEN=laser-stand-dev') | Set-Content -Encoding ascii 'server\.env'"
+  powershell -NoProfile -Command "$s=[guid]::NewGuid().Guid.Replace('-','')+[guid]::NewGuid().Guid.Replace('-',''); $s=$s.Substring(0,64); @('PORT=3210','SITE_PROXY_PORT=3211','WEB_PORT=5173','DASHBOARD_PORT=6791','CONVEX_CLOUD_ORIGIN=http://%IP%:3210','CONVEX_SITE_ORIGIN=http://%IP%:3211','INSTANCE_NAME=laser-erp',('INSTANCE_SECRET='+$s),'AGENT_TOKEN=laser-stand-dev','API_TOKEN=laser-stand-dev') | Set-Content -Encoding ascii 'server\.env'"
   echo Создан server\.env
 )
 for /f "usebackq tokens=1,* delims==" %%A in ("server\.env") do set "%%A=%%B"
@@ -40,13 +40,16 @@ for /f "delims=" %%K in ('docker run --rm -e INSTANCE_NAME^=%INSTANCE_NAME% -e I
 
 echo Загружаю функции...
 call npx convex deploy --yes --admin-key "%ADMIN_KEY%" --url "http://127.0.0.1:%PORT%" --env-file NUL || (pause & exit /b 1)
+if not defined API_TOKEN set "API_TOKEN=%AGENT_TOKEN%"
 call npx convex env set AGENT_TOKEN "%AGENT_TOKEN%" --admin-key "%ADMIN_KEY%" --url "http://127.0.0.1:%PORT%"
+call npx convex env set API_TOKEN "%API_TOKEN%" --admin-key "%ADMIN_KEY%" --url "http://127.0.0.1:%PORT%"
 
 echo.
 echo Готово.
 echo   Веб:            http://%IP%:%WEB_PORT%
 echo   BaseUrl агента: %CONVEX_SITE_ORIGIN%   (его вводить при установке агента на станке)
 echo   Ключ агента:    %AGENT_TOKEN%
+echo   Ключ API:       %API_TOKEN%   (внешнее приложение, контракт docs\API.md)
 echo   Панель Convex:  http://%IP%:%DASHBOARD_PORT%
 echo Остановка: docker compose -f "%~dp0server\docker-compose.yml" down
 pause

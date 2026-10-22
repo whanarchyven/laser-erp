@@ -61,6 +61,7 @@ CONVEX_SITE_ORIGIN=http://$ip:$site
 INSTANCE_NAME=laser-erp
 INSTANCE_SECRET=$secret
 AGENT_TOKEN=laser-stand-dev
+API_TOKEN=laser-stand-dev
 EOF
   echo "Создан $envfile"
 fi
@@ -93,7 +94,9 @@ echo "Загружаю функции..."
     --admin-key "$admin" \
     --url "http://127.0.0.1:$PORT" \
     --env-file /dev/null )
+api_token=${API_TOKEN:-$AGENT_TOKEN}
 ( cd "$root" && npx convex env set AGENT_TOKEN "$AGENT_TOKEN" --admin-key "$admin" --url "http://127.0.0.1:$PORT" ) >/dev/null
+( cd "$root" && npx convex env set API_TOKEN "$api_token" --admin-key "$admin" --url "http://127.0.0.1:$PORT" ) >/dev/null
 
 host=${CONVEX_SITE_ORIGIN#*://}; host=${host%%:*}
 cat <<EOF
@@ -102,6 +105,7 @@ cat <<EOF
   Веб:            http://$host:$WEB_PORT
   BaseUrl агента: $CONVEX_SITE_ORIGIN   (его вводить при установке агента на станке)
   Ключ агента:    $AGENT_TOKEN
+  Ключ API:       $api_token   (внешнее приложение, контракт docs/API.md)
   Панель Convex:  http://$host:$DASHBOARD_PORT
 Остановка:  ${compose[*]} -f "$here/docker-compose.yml" down
 Журналы:    ${compose[*]} -f "$here/docker-compose.yml" logs -f
