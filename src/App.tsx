@@ -162,35 +162,103 @@ export default function App() {
   );
 }
 
+type JobView = FunctionReturnType<typeof api.jobs.list>[number];
+type MachineView = FunctionReturnType<typeof api.stand.machines>[number];
+
+const NO_MACHINE = "";
+
 function Queue() {
   const jobs = useQuery(api.jobs.list);
-  if (jobs === undefined) return <p className="muted">Загрузка…</p>;
-  if (jobs.length === 0) return <div className="card"><p>Очередь пустая. Создайте задачу из пресета или нового LXDS.</p></div>;
+  const machines = useQuery(api.stand.machines);
+  if (jobs === undefined || machines === undefined) return <p className="muted">Загрузка…</p>;
+  const ids = [...machines.map((m) => m.machineId)];
+  for (const job of jobs) {
+    const id = job.machineId ?? NO_MACHINE;
+    if (!ids.includes(id)) ids.push(id);
+  }
+  if (ids.length === 0) return <div className="card"><p>Очередь пустая. Создайте задачу из пресета или нового LXDS.</p></div>;
   return (
-    <div className="grid">
-      {jobs.map((job) => {
-        const total = job.readyCount + job.pendingCount;
-        const ratio = total === 0 ? 0 : job.readyCount / total;
-        return (
-          <a key={job._id} className="card" href={`#/job/${job._id}`}>
-            <div className="row">
-              <strong>{job.number} · {job.title}</strong>
-              <span className={`badge ${job.status}`}>{statusLabel[job.status] ?? job.status}</span>
-            </div>
-            <p className="muted">{job.machineId ?? "станок не указан"} · {job.fileName} · {formatTime(job.createdAt)}</p>
-            <div className="progress" style={{ marginTop: 10 }}><span style={{ width: `${ratio * 100}%` }} /></div>
-            <p style={{ marginTop: 8 }}>
-              Листов {job.sheetsDone} из {job.sheetsTotal} · позиций готово {job.readyCount} из {total}
-              {job.estimateLeftSec !== null && job.estimateLeftSec > 0 ? ` · осталось ≈ ${formatDuration(job.estimateLeftSec)}` : ""}
-            </p>
-            <p className="muted">
-              {job.lines.filter((line) => line.qtyDone < line.qtyPlanned).slice(0, 4).map((line) => line.name ?? line.cadName).join(", ") || "все позиции закрыты"}
-            </p>
-          </a>
-        );
-      })}
+    <div className="stack">
+      {ids.map((id) => (
+        <MachineQueue
+          key={id || "none"}
+          machineId={id}
+          machine={machines.find((m) => m.machineId === id) ?? null}
+          jobs={jobs.filter((job) => (job.machineId ?? NO_MACHINE) === id)}
+        />
+      ))}
     </div>
   );
+}
+
+function MachineQueue({ machineId, machine, jobs }: { machineId: string; machine: MachineView | null; jobs: JobView[] }) {
+  const open = jobs.filter((job) => job.status !== "done" && job.status !== "cancelled").sort((a, b) => a.createdAt - b.createdAt);
+  const closed = jobs.filter((job) => job.status === "done" || job.status === "cancelled");
+  const online = machine !== null && isOnline(machine.at);
+  return (
+    <section className="card stack queue">
+      <div className="row">
+        <div>
+          <h2>{machineId || "Без станка"}</h2>
+          <p className="muted">
+            {machine === null
+              ? machineId ? "агент ещё не выходил на связь" : "задачи без станка"
+              : `${online ? "на связи" : `нет связи с ${formatTime(machine.at)}`}${machine.ip ? ` · ${machine.ip}` : ""}`}
+          </p>
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          {machine && online && machine.machineState && (
+            <span className={`badge ${machine.alarms.length > 0 ? "failed" : machine.machineState === "Working" ? "in_progress" : "queued"}`}>
+              {machineStateLabel(machine.machineState)}
+            </span>
+          )}
+          <span className="badge queued">в очереди: {open.length}</span>
+        </div>
+      </div>
+      {machine?.alarms.map((alarm, i) => <p key={i} className="error">Авария: {alarm}</p>)}
+      {open.length === 0 ? (
+        <p className="muted">Очередь станка пустая.</p>
+      ) : (
+        <div className="grid">
+          {open.map((job, i) => <JobCard key={job._id} job={job} position={i + 1} />)}
+        </div>
+      )}
+      {closed.length > 0 && (
+        <details>
+          <summary>Закрытые задачи ({closed.length})</summary>
+          <div className="grid" style={{ marginTop: 10 }}>
+            {closed.map((job) => <JobCard key={job._id} job={job} />)}
+          </div>
+        </details>
+      )}
+    </section>
+  );
+}
+
+function JobCard({ job, position }: { job: JobView; position?: number }) {
+  const total = job.readyCount + job.pendingCount;
+  const ratio = total === 0 ? 0 : job.readyCount / total;
+  return (
+    <a className="card" href={`#/job/${job._id}`}>
+      <div className="row">
+        <strong>{position !== undefined ? `${position}. ` : ""}{job.number} · {job.title}</strong>
+        <span className={`badge ${job.status}`}>{job.fileReady ? statusLabel[job.status] ?? job.status : "готовится файл"}</span>
+      </div>
+      <p className="muted">{job.thicknessMm ? `${job.thicknessMm} мм · ` : ""}{job.fileName} · {formatTime(job.createdAt)}</p>
+      <div className="progress" style={{ marginTop: 10 }}><span style={{ width: `${ratio * 100}%` }} /></div>
+      <p style={{ marginTop: 8 }}>
+        Листов {job.sheetsDone} из {job.sheetsTotal} · позиций готово {job.readyCount} из {total}
+        {job.estimateLeftSec !== null && job.estimateLeftSec > 0 ? ` · осталось ≈ ${formatDuration(job.estimateLeftSec)}` : ""}
+      </p>
+      <p className="muted">
+        {job.lines.filter((line) => line.qtyDone < line.qtyPlanned).slice(0, 4).map((line) => line.name ?? line.cadName).join(", ") || "все позиции закрыты"}
+      </p>
+    </a>
+  );
+}
+
+function sheetTitle(index: number, thicknessMm: string | null) {
+  return thicknessMm ? `Лист ${index} (${thicknessMm}мм)` : `Лист ${index}`;
 }
 
 function sheetMismatch(job: { cypcutDone: number[] | null; sheets: Array<{ index: number; done: number; planCount: number }> }) {
@@ -213,7 +281,7 @@ function JobPage({ id }: { id: Id<"jobs"> }) {
         <div className="row">
           <div>
             <h2>{job.number} · {job.title}</h2>
-            <p className="muted">{job.machineId ?? "станок не указан"} · {job.fileName}</p>
+            <p className="muted">{job.machineId ?? "станок не указан"} · {job.thicknessMm ? `${job.thicknessMm} мм · ` : ""}{job.fileName}</p>
           </div>
           <span className={`badge ${job.status}`}>{statusLabel[job.status] ?? job.status}</span>
         </div>
@@ -259,8 +327,8 @@ function JobPage({ id }: { id: Id<"jobs"> }) {
                 className={`sheet ${job.currentSheetIndex === sheet.index ? "current" : ""} ${sheet.done >= sheet.planCount ? "finished" : ""}`}
                 style={{ margin: 0 }}
               >
-                {sheet.previewUrl ? <img src={sheet.previewUrl} alt={`Лист ${sheet.index}`} /> : <div className="thumb" style={{ width: "100%", height: 220 }} />}
-                <strong>Лист {sheet.index}{sheet.planCount > 1 ? ` ×${sheet.planCount}` : ""} · вырезано {sheet.done} из {sheet.planCount}</strong>
+                {sheet.previewUrl ? <img src={sheet.previewUrl} alt={sheetTitle(sheet.index, job.thicknessMm)} /> : <div className="thumb" style={{ width: "100%", height: 220 }} />}
+                <strong>{sheetTitle(sheet.index, job.thicknessMm)}{sheet.planCount > 1 ? ` ×${sheet.planCount}` : ""} · вырезано {sheet.done} из {sheet.planCount}</strong>
                 {job.cypcutDone?.includes(sheet.index) && <span>в CypCut: вырезан</span>}
                 {job.currentFromCypCut && job.currentSheetIndex === sheet.index && <span>выбран в CypCut</span>}
                 <span className="muted">{sheet.width}×{sheet.height} мм</span>
@@ -329,7 +397,9 @@ function NewJob() {
   const [fileId, setFileId] = useState<Id<"_storage"> | null>(null);
   const [fileName, setFileName] = useState("");
   const [sha, setSha] = useState("");
-  const [thickness, setThickness] = useState<string | null>(null);
+  const [thickness, setThickness] = useState("");
+  const [presetThickness, setPresetThickness] = useState<Record<string, string>>({});
+  const [presetError, setPresetError] = useState<string | null>(null);
   const [sheets, setSheets] = useState<Inspected["sheets"]>([]);
   const [sheetUrls, setSheetUrls] = useState<Inspected["sheetUrls"]>([]);
   const [kind, setKind] = useState<"nest" | "drawing">("nest");
@@ -366,7 +436,7 @@ function NewJob() {
       setFileId(storageId);
       setFileName(file.name);
       setSha(preview.sha256);
-      setThickness(preview.thicknessMm);
+      setThickness(preview.thicknessMm ?? "");
       setSheets(preview.sheets);
       setSheetUrls(preview.sheetUrls);
       setKind(preview.kind);
@@ -388,6 +458,10 @@ function NewJob() {
 
   async function commit(enqueueNow: boolean) {
     if (!fileId) return;
+    if (enqueueNow && !thickness.trim()) {
+      setError("Укажите толщину листа, например 1.0");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -396,7 +470,7 @@ function NewJob() {
         fileName,
         fileId,
         sha256: sha,
-        thicknessMm: thickness ?? undefined,
+        thicknessMm: thickness.trim() || undefined,
         sheets,
         enqueue: enqueueNow,
         machineId: enqueueNow ? machineId : undefined,
@@ -451,19 +525,48 @@ function NewJob() {
 
       <div className="card">
         <h2>Из сохранённого пресета</h2>
+        <p className="muted">Толщина попадёт в названия листов в CypCut: «Лист 1 (1.0мм)», «Лист 2 (1.0мм)»…</p>
         {presets === undefined && <p className="muted">Загрузка…</p>}
         {presets?.length === 0 && <p className="muted">Пресетов пока нет.</p>}
         <div className="grid">
-          {presets?.map((preset) => (
-            <div key={preset._id} className="row">
-              <div>
-                <strong>{preset.title}</strong>
-                <div className="muted">{preset.sheetCount} лист. · {preset.lineCount} дет. · {preset.thicknessMm ? `${preset.thicknessMm} мм` : "толщина не указана"}{preset.ready ? "" : " · есть детали без карточек"}</div>
+          {presets?.map((preset) => {
+            const value = presetThickness[preset._id] ?? preset.thicknessMm ?? "";
+            return (
+              <div key={preset._id} className="row">
+                <div>
+                  <strong>{preset.title}</strong>
+                  <div className="muted">{preset.sheetCount} лист. · {preset.lineCount} дет.{preset.ready ? "" : " · есть детали без карточек"}</div>
+                </div>
+                <div className="row" style={{ gap: 8 }}>
+                  <label className="inline">
+                    Толщина, мм
+                    <input
+                      className="thickness"
+                      inputMode="decimal"
+                      placeholder="1.0"
+                      value={value}
+                      onChange={(event) => setPresetThickness((prev) => ({ ...prev, [preset._id]: event.target.value }))}
+                    />
+                  </label>
+                  <button
+                    className="primary"
+                    disabled={!preset.ready || !machineId || !value.trim()}
+                    title={value.trim() ? "" : "Укажите толщину листа"}
+                    onClick={() => {
+                      setPresetError(null);
+                      enqueue({ presetId: preset._id, machineId, thicknessMm: value })
+                        .then((id) => { window.location.hash = `#/job/${id}`; })
+                        .catch((reason: unknown) => setPresetError(reason instanceof Error ? reason.message.replace(/^.*Uncaught Error:\s*/s, "").split("\n")[0] ?? "" : "Не удалось поставить в очередь"));
+                    }}
+                  >
+                    В очередь
+                  </button>
+                </div>
               </div>
-              <button className="primary" disabled={!preset.ready || !machineId} onClick={() => void enqueue({ presetId: preset._id, machineId }).then((id) => { window.location.hash = `#/job/${id}`; })}>В очередь</button>
-            </div>
-          ))}
+            );
+          })}
         </div>
+        {presetError && <p className="error">{presetError}</p>}
       </div>
 
       <div className="card stack">
@@ -479,7 +582,11 @@ function NewJob() {
         {fileId && (
           <>
             <label>Название<input value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-            <p className="muted">{fileName} · {sheetLabel}{thickness ? ` · ${thickness} мм` : ""}</p>
+            <label>
+              Толщина листа, мм (пойдёт в названия листов в CypCut)
+              <input className="thickness" inputMode="decimal" placeholder="1.0" value={thickness} onChange={(event) => setThickness(event.target.value)} />
+            </label>
+            <p className="muted">{fileName} · {sheetLabel}</p>
             {kind === "drawing" && (
               <p className="error">Это плоский чертёж без раскроя: состава деталей в файле нет. Задача будет одной позицией на один лист. Для учёта по деталям загрузите файл из папки «Варианты».</p>
             )}
@@ -492,8 +599,8 @@ function NewJob() {
                     const sec = estimate(rate, sheet.cutLengthMm, sheet.pierces);
                     return (
                       <figure key={sheet.index} className="sheet" style={{ margin: 0 }}>
-                        {url ? <img src={url} alt={`Лист ${sheet.index}`} /> : <div className="thumb" style={{ width: "100%", height: 220 }} />}
-                        <strong>Лист {sheet.index}{sheet.planCount > 1 ? ` ×${sheet.planCount}` : ""}</strong>
+                        {url ? <img src={url} alt={sheetTitle(sheet.index, thickness.trim() || null)} /> : <div className="thumb" style={{ width: "100%", height: 220 }} />}
+                        <strong>{sheetTitle(sheet.index, thickness.trim() || null)}{sheet.planCount > 1 ? ` ×${sheet.planCount}` : ""}</strong>
                         {sheet.cutLengthMm !== undefined && <span className="muted">рез {meters(sheet.cutLengthMm)} · пробивок {sheet.pierces}</span>}
                         {sec !== null && <span>≈ {formatDuration(sec)} на лист</span>}
                       </figure>
@@ -598,7 +705,7 @@ function Machines() {
             <div>
               <h2>{machine.machineId}</h2>
               <p className="muted">
-                {machine.hostname} · агент {machine.agentVersion} · связь {formatTime(machine.at)}
+                {machine.hostname}{machine.ip ? ` · IP ${machine.ip}` : ""}{machine.serverUrl ? ` · сервер ${machine.serverUrl}` : ""} · агент {machine.agentVersion} · связь {formatTime(machine.at)}
                 {isOnline(machine.at) ? "" : " · нет связи больше минуты"}
               </p>
             </div>

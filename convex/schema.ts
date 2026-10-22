@@ -78,6 +78,9 @@ export default defineSchema({
     lastError: v.optional(v.string()),
     sheetsDone: v.optional(v.number()),
     machineId: v.optional(v.string()),
+    thicknessMm: v.optional(v.string()),
+    // false while the server writes sheet names into the job's copy of the file
+    fileReady: v.optional(v.boolean()),
     createdAt: v.number(),
   })
     .index("by_status", ["status"])
@@ -150,5 +153,7 @@ export default defineSchema({
     debug: v.optional(v.array(v.string())),
     machineState: v.optional(v.string()),
     alarms: v.optional(v.array(v.string())),
+    ip: v.optional(v.string()),
+    serverUrl: v.optional(v.string()),
   }).index("by_machine", ["machineId"]),
 });

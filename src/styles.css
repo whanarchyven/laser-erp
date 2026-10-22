@@ -117,3 +117,7 @@ th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line
 }
 .qty { display: flex; gap: 6px; align-items: center; }
 .qty input { width: 72px; }
+
+label.inline { display: flex; align-items: center; gap: 6px; }
+input.thickness { width: 80px; }
+section.queue > .grid { margin-top: 4px; }

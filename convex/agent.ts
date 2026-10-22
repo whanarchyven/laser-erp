@@ -40,6 +40,7 @@ export const programsForAgent = internalQuery({
   handler: async (ctx, args) => {
     const jobs = await machineJobs(ctx, args.machineId);
     return jobs
+      .filter((job) => job.fileReady !== false)
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((job) => ({
         programId: job._id,
@@ -205,6 +206,8 @@ export const recordHeartbeat = internalMutation({
     debug: v.optional(v.array(v.string())),
     machineState: v.optional(v.string()),
     alarms: v.optional(v.array(v.string())),
+    ip: v.optional(v.string()),
+    serverUrl: v.optional(v.string()),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -218,10 +221,11 @@ export const recordHeartbeat = internalMutation({
       existing.cypcutRunning !== args.cypcutRunning ||
       existing.windowTitle !== args.windowTitle ||
       existing.machineState !== args.machineState ||
+      existing.ip !== args.ip ||
       (existing.alarms ?? []).join("|") !== (args.alarms ?? []).join("|")
     ) {
       console.log(
-        `[агент] ${args.machineId}: версия ${args.agentVersion}, CypCut ${args.cypcutRunning ? "запущен" : "не запущен"}, заголовок «${args.windowTitle}», состояние ${args.machineState ?? "—"}${args.alarms?.length ? `, аварии: ${args.alarms.join("; ")}` : ""}`,
+        `[агент] ${args.machineId}: версия ${args.agentVersion}, CypCut ${args.cypcutRunning ? "запущен" : "не запущен"}, IP ${args.ip ?? "—"}, заголовок «${args.windowTitle}», состояние ${args.machineState ?? "—"}${args.alarms?.length ? `, аварии: ${args.alarms.join("; ")}` : ""}`,
       );
       for (const line of args.debug ?? []) console.log(`[агент] ${args.machineId}: ${line}`);
     }
@@ -238,6 +242,8 @@ export const recordHeartbeat = internalMutation({
         debug: args.debug,
         machineState: args.machineState,
         alarms: args.alarms,
+        ip: args.ip,
+        serverUrl: args.serverUrl,
       });
     } else {
       await ctx.db.insert("heartbeats", args);
