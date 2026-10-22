@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-const string AgentVersion = "0.7.0";
+const string AgentVersion = "0.8.0";
 
 using var single = new Mutex(true, @"Global\LaserAgent", out var firstInstance);
 if (!firstInstance) return;
@@ -89,6 +89,7 @@ while (true)
     }
     if (online) Run("активная задача", () => TrackActive(state, programs, snapshot));
     Run("журнал станка", () => TrackLog(config, state, snapshot, nest));
+    if (DateTime.Now - lastOpen < TimeSpan.FromMinutes(2)) Run("вопрос о сохранении", () => CypCutWatch.DismissSavePrompt());
     if (online)
     {
         if (DateTime.Now - lastOpen > TimeSpan.FromSeconds(60))
@@ -311,6 +312,8 @@ static async Task HeartbeatAsync(HttpClient http, AgentConfig config, CypCutSnap
         at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
         logTail = entries?.TakeLast(15).Select(e => e.Line).ToArray(),
         machineState = entries is null ? null : MachineLog.State(entries),
+        ip = Step("адрес станка", () => Network.LocalAddress(config.BaseUrl)),
+        serverUrl = config.BaseUrl,
         alarms = entries is null ? null : MachineLog.ActiveAlarms(entries),
         panel = snapshot.Running ? Step("панель CypCut", () => CypCutWatch.PanelValues(snapshot)) : null,
         nest = nest is null ? null : new { programId = active, current = nest.Current, done = nest.Done, total = nest.Total },
@@ -500,6 +503,7 @@ static class CypCutWatch
         while (DateTime.Now < deadline)
         {
             Thread.Sleep(500);
+            if (DismissSavePrompt()) continue;
             var dialog = FindFileDialog();
             if (dialog is null) continue;
             var edit = FindFileNameEdit(dialog.Value);
@@ -510,6 +514,9 @@ static class CypCutWatch
             if (ok == 0) throw new InvalidOperationException("В окне «Открыть» нет кнопки OK");
             Native.PostMessage(ok, Native.BM_CLICK, 0, 0);
             Console.WriteLine($"Файл выбран в окне «Открыть»: {path}");
+            // Some builds ask about unsaved changes only after the new file is chosen.
+            for (var wait = DateTime.Now.AddSeconds(15); DateTime.Now < wait; Thread.Sleep(500))
+                if (DismissSavePrompt()) break;
             return;
         }
         throw new InvalidOperationException("CypCut не показал окно «Открыть» за 90 с (возможно, ждёт ответа оператора)");
@@ -588,20 +595,79 @@ static class CypCutWatch
             memoryTitle = snapshot.Title;
         }
         var list = snapshot.Windows.FirstOrDefault(w => w.Visible && w.Class == "TFsCheckListBox"
-            && Ask(w.Handle, Native.LB_GETCOUNT) > 1 && ItemText(w.Handle, 1).StartsWith("Nest result", StringComparison.OrdinalIgnoreCase));
+            && Ask(w.Handle, Native.LB_GETCOUNT) > 1 && IsSheetItem(ItemText(w.Handle, 1)));
         if (list is null || !Native.GetWindowRect(list.Handle, out var origin)) return null;
         var items = ListItems(list.Handle, origin, CaptureWindow(list.Handle));
         int? current = null;
         var sheet = 0;
         foreach (var item in items)
         {
-            if (!item.Text.StartsWith("Nest result", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!IsSheetItem(item.Text)) continue;
             sheet++;
             if (item.Selected) current = sheet;
             else if (item.Color != 0) doneMemory[sheet] = item.Color == DoneColor;
         }
         var done = doneMemory.Where(p => p.Value && p.Key <= sheet).Select(p => p.Key).Order().ToArray();
         return new NestState(current, done, sheet);
+    }
+
+    // CypCut: "Nest result", CypCutE: "NestedResult01", files sent by the server: "Лист 1 (1.0мм)".
+    static readonly System.Text.RegularExpressions.Regex SheetItem =
+        new(@"^\s*(nest\s*(ed)?\s*_?result|лист\s*\d)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    static bool IsSheetItem(string text) => SheetItem.IsMatch(text);
+
+    static readonly System.Text.RegularExpressions.Regex SaveQuestion =
+        new(@"save|сохран|保存", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    static readonly string[] NoCaptions = ["no", "нет", "否", "don't save", "do not save", "не сохранять"];
+
+    // Answers "No" to CypCut's "save changes?" question so a new job can replace the open drawing.
+    public static bool DismissSavePrompt()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        var ids = Processes().Select(p => (uint)p.Id).ToHashSet();
+        var answered = false;
+        Native.EnumWindows((top, _) =>
+        {
+            Native.GetWindowThreadProcessId(top, out var pid);
+            if (!ids.Contains(pid) || !Native.IsWindowVisible(top) || Native.GetWindow(top, Native.GW_OWNER) == 0) return true;
+            if (!Native.GetWindowRect(top, out var box) || box.Right - box.Left > 900 || box.Bottom - box.Top > 600) return true;
+            if (FindFileNameEdit(top) != 0) return true;
+            var children = new List<CypCutWindow>();
+            Native.EnumChildWindows(top, (child, _) =>
+            {
+                children.Add(Describe(child, Native.GetParent(child)));
+                return true;
+            }, 0);
+            var texts = children.Select(c => c.Text).Append(TextOf(top)).Where(t => t.Length > 0).ToList();
+            if (!texts.Any(t => SaveQuestion.IsMatch(t) && t.Length > 6)) return true;
+            var no = children.FirstOrDefault(c => c.Visible
+                && (c.Class.Contains("Button", StringComparison.OrdinalIgnoreCase) || c.Class.Contains("Btn", StringComparison.OrdinalIgnoreCase))
+                && NoCaptions.Contains(Caption(c.Text)));
+            if (no is null) return true;
+            Click(no);
+            Console.WriteLine($"Закрыл вопрос о сохранении кнопкой «{no.Text}»: {string.Join(" | ", texts.Where(t => t != no.Text).Take(4))}");
+            answered = true;
+            return false;
+        }, 0);
+        if (answered) Thread.Sleep(700);
+        return answered;
+    }
+
+    static string Caption(string text) =>
+        System.Text.RegularExpressions.Regex.Replace(text.Replace("&", ""), @"\(\w\)", "").Trim().ToLowerInvariant();
+
+    static void Click(CypCutWindow button)
+    {
+        if (button.Class is "Button" or "TButton" or "TBitBtn")
+        {
+            Native.PostMessage(button.Handle, Native.BM_CLICK, 0, 0);
+            return;
+        }
+        if (!Native.GetWindowRect(button.Handle, out var box)) return;
+        var lParam = (nint)((((box.Bottom - box.Top) / 2) << 16) | (((box.Right - box.Left) / 2) & 0xFFFF));
+        Native.PostMessage(button.Handle, Native.WM_LBUTTONDOWN, 1, lParam);
+        Native.PostMessage(button.Handle, Native.WM_LBUTTONUP, 0, lParam);
     }
 
     static string ItemText(nint handle, int index)
@@ -937,6 +1003,8 @@ static class Native
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(nint parent, EnumProc proc, nint lParam);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(nint hwnd, out uint pid);
     [DllImport("user32.dll")] public static extern nint GetParent(nint hwnd);
+    public const uint GW_OWNER = 4;
+    [DllImport("user32.dll")] public static extern nint GetWindow(nint hwnd, uint command);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(nint hwnd);
     [DllImport("kernel32.dll", SetLastError = true)] public static extern bool IsWow64Process(nint process, out bool wow64);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(nint hwnd, StringBuilder name, int max);
@@ -1125,3 +1193,16 @@ sealed record ProgramList(List<ProgramItem>? Programs = null);
 sealed record ProgramItem(string ProgramId, string ProgramNumber, string Title, string Status, string FileName, string Sha256);
 sealed record OutEvent(string EventId, string? ProgramId, string Type, long At, int? Count = null, string? Detail = null, int? Sheet = null);
 sealed record NestState(int? Current, int[] Done, int Total);
+
+static class Network
+{
+    // The address Windows would use to reach the server: that is the one worth showing in the web.
+    public static string? LocalAddress(string baseUrl)
+    {
+        var uri = new Uri(baseUrl);
+        using var socket = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+        var host = System.Net.Dns.GetHostAddresses(uri.Host).First(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+        socket.Connect(host, uri.Port);
+        return (socket.LocalEndPoint as System.Net.IPEndPoint)?.Address.ToString();
+    }
+}

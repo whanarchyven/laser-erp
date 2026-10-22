@@ -23,6 +23,8 @@ export const machines = query({
       cypcutEstimate: v.union(cypcutEstimateValidator, v.null()),
       debug: v.array(v.string()),
       machineState: v.union(v.string(), v.null()),
+      ip: v.union(v.string(), v.null()),
+      serverUrl: v.union(v.string(), v.null()),
       alarms: v.array(v.string()),
       events: v.array(
         v.object({
@@ -54,6 +56,8 @@ export const machines = query({
         cypcutEstimate: parseCypCutEstimate(row.logTail ?? []),
         debug: row.debug ?? [],
         machineState: row.machineState ?? null,
+        ip: row.ip ?? null,
+        serverUrl: row.serverUrl ?? null,
         alarms: row.alarms ?? [],
         events: (
           await ctx.db

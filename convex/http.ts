@@ -103,6 +103,8 @@ const postHeartbeat = httpAction(async (ctx, request) => {
     debug?: unknown;
     machineState?: unknown;
     alarms?: unknown;
+    ip?: unknown;
+    serverUrl?: unknown;
   };
   await ctx.runMutation(internal.agent.recordHeartbeat, {
     machineId: body.machineId ?? body.hostname ?? "stand",
@@ -117,6 +119,8 @@ const postHeartbeat = httpAction(async (ctx, request) => {
     debug: stringList(body.debug, 30),
     machineState: typeof body.machineState === "string" ? body.machineState.slice(0, 40) : undefined,
     alarms: stringList(body.alarms, 10),
+    ip: typeof body.ip === "string" ? body.ip.slice(0, 100) : undefined,
+    serverUrl: typeof body.serverUrl === "string" ? body.serverUrl.slice(0, 200) : undefined,
   });
   return json({ ok: true });
 });
