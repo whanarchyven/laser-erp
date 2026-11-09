@@ -3,9 +3,10 @@ setlocal
 cd /d "%~dp0"
 where docker >nul 2>&1 || (echo Docker не найден. Установите Docker Desktop и запустите его. & pause & exit /b 1)
 
-rem Address other computers use to reach this one.
-set "IP="
-for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /c:"IPv4"') do (
+rem Address the machines use. Set it yourself when the server has two network cards:
+rem   set SERVER_IP=192.168.50.1
+set "IP=%SERVER_IP%"
+if not defined IP for /f "tokens=2 delims=:" %%A in ('ipconfig ^| findstr /c:"IPv4"') do (
   if not defined IP (
     for /f "tokens=* delims= " %%B in ("%%A") do set "IP=%%B"
   )

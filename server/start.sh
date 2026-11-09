@@ -26,21 +26,22 @@ if ! docker compose version >/dev/null 2>&1; then
   fi
 fi
 
-# The address other computers (the machines) use to reach this one.
-# A real network address of this computer, skipping loopback, link-local and container bridges.
-ip=""
-candidates=""
-if command -v hostname >/dev/null 2>&1; then candidates=$(hostname -I 2>/dev/null); fi
-if [ -z "$candidates" ] && command -v ipconfig >/dev/null 2>&1; then
-  candidates=$(ipconfig | tr -d '\r' | awk '/IPv4/{print $NF}')
+# The address the machines use. Set SERVER_IP when this computer has two network cards.
+ip="${SERVER_IP:-}"
+if [ -z "$ip" ]; then
+  candidates=""
+  if command -v hostname >/dev/null 2>&1; then candidates=$(hostname -I 2>/dev/null); fi
+  if [ -z "$candidates" ] && command -v ipconfig >/dev/null 2>&1; then
+    candidates=$(ipconfig | tr -d '\r' | awk '/IPv4/{print $NF}')
+  fi
+  for c in $candidates; do
+    case "$c" in
+      127.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) continue ;;
+    esac
+    echo "$c" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || continue
+    ip=$c; break
+  done
 fi
-for c in $candidates; do
-  case "$c" in
-    127.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) continue ;;
-  esac
-  echo "$c" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || continue
-  ip=$c; break
-done
 [ -n "$ip" ] || ip=127.0.0.1
 
 port=3210
